@@ -3,6 +3,20 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
 
+def calculate_delay_ms(now: datetime.datetime, target: datetime.time) -> int:
+    """現在時刻と目標時刻から、通知までの待機時間（ミリ秒）を返す。"""
+    if now.hour == target.hour and now.minute == target.minute:
+        return 0
+
+    target_dt = now.replace(hour=target.hour, minute=target.minute, second=0, microsecond=0)
+
+    # すでに過ぎている時刻が指定された場合は翌日に通知
+    if target_dt < now:
+        target_dt += datetime.timedelta(days=1)
+
+    return int((target_dt - now).total_seconds() * 1000)
+
+
 def ask_target_time(root: tk.Tk) -> datetime.time | None:
     """時間指定メニュー（時・分）を表示し、選択された時刻を返す。"""
     dialog = tk.Toplevel(root)
@@ -64,13 +78,7 @@ def ask_target_time(root: tk.Tk) -> datetime.time | None:
 def schedule_message(root: tk.Tk, message: str, target: datetime.time) -> None:
     """指定時刻になったらメッセージを表示する。"""
     now = datetime.datetime.now()
-    target_dt = now.replace(hour=target.hour, minute=target.minute, second=0, microsecond=0)
-
-    # すでに過ぎている時刻が指定された場合は翌日に通知
-    if target_dt <= now:
-        target_dt += datetime.timedelta(days=1)
-
-    delay_ms = int((target_dt - now).total_seconds() * 1000)
+    delay_ms = calculate_delay_ms(now, target)
 
     def show_reminder() -> None:
         messagebox.showinfo("リマインダー", message)
