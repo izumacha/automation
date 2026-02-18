@@ -1,6 +1,6 @@
 import datetime
 import tkinter as tk
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import messagebox, ttk
 
 
 def calculate_delay_ms(now: datetime.datetime, target: datetime.time) -> int:
@@ -17,101 +17,99 @@ def calculate_delay_ms(now: datetime.datetime, target: datetime.time) -> int:
     return int((target_dt - now).total_seconds() * 1000)
 
 
-def ask_target_time(root: tk.Tk) -> datetime.time | None:
-    """時間指定メニュー（時・分）を表示し、選択された時刻を返す。"""
-    dialog = tk.Toplevel(root)
-    dialog.title("時間指定メニュー")
-    dialog.resizable(False, False)
-    dialog.grab_set()
+class ReminderApp:
+    """リマインダー設定用のシンプルなGUIアプリ。"""
 
-    selected = {"time": None}
+    def __init__(self, root: tk.Tk) -> None:
+        self.root = root
+        self.root.title("リマインダー")
+        self.root.resizable(False, False)
+        self.root.columnconfigure(0, weight=1)
 
-    now = datetime.datetime.now()
-    hour_var = tk.StringVar(value=f"{now.hour:02d}")
-    minute_var = tk.StringVar(value=f"{now.minute:02d}")
+        self.scheduled_job_id: str | None = None
 
-    ttk.Label(dialog, text="通知時刻を選択してください").grid(
-        row=0, column=0, columnspan=3, padx=12, pady=(12, 8)
-    )
+        now = datetime.datetime.now()
+        self.hour_var = tk.StringVar(value=f"{now.hour:02d}")
+        self.minute_var = tk.StringVar(value=f"{now.minute:02d}")
 
-    hour_menu = ttk.Combobox(
-        dialog,
-        textvariable=hour_var,
-        values=[f"{h:02d}" for h in range(24)],
-        state="readonly",
-        width=4,
-    )
-    hour_menu.grid(row=1, column=0, padx=(12, 4), pady=8)
+        frame = ttk.Frame(self.root, padding=16)
+        frame.grid(sticky="nsew")
+        frame.columnconfigure(1, weight=1)
 
-    ttk.Label(dialog, text=":").grid(row=1, column=1, pady=8)
+        ttk.Label(frame, text="メッセージ").grid(row=0, column=0, sticky="w", pady=(0, 8))
+        self.message_text = tk.Text(frame, width=36, height=5, wrap="word")
+        self.message_text.grid(row=1, column=0, columnspan=4, sticky="ew")
 
-    minute_menu = ttk.Combobox(
-        dialog,
-        textvariable=minute_var,
-        values=[f"{m:02d}" for m in range(60)],
-        state="readonly",
-        width=4,
-    )
-    minute_menu.grid(row=1, column=2, padx=(4, 12), pady=8)
+        ttk.Label(frame, text="通知時刻").grid(row=2, column=0, sticky="w", pady=(12, 8))
 
-    def on_ok() -> None:
-        selected["time"] = datetime.time(
-            hour=int(hour_var.get()), minute=int(minute_var.get())
+        self.hour_menu = ttk.Combobox(
+            frame,
+            textvariable=self.hour_var,
+            values=[f"{h:02d}" for h in range(24)],
+            state="readonly",
+            width=4,
         )
-        dialog.destroy()
+        self.hour_menu.grid(row=2, column=1, sticky="w", pady=(12, 8))
 
-    def on_cancel() -> None:
-        dialog.destroy()
+        ttk.Label(frame, text=":").grid(row=2, column=2, sticky="w", pady=(12, 8))
 
-    buttons = ttk.Frame(dialog)
-    buttons.grid(row=2, column=0, columnspan=3, pady=(0, 12))
+        self.minute_menu = ttk.Combobox(
+            frame,
+            textvariable=self.minute_var,
+            values=[f"{m:02d}" for m in range(60)],
+            state="readonly",
+            width=4,
+        )
+        self.minute_menu.grid(row=2, column=3, sticky="w", pady=(12, 8))
 
-    ttk.Button(buttons, text="OK", command=on_ok).pack(side=tk.LEFT, padx=4)
-    ttk.Button(buttons, text="キャンセル", command=on_cancel).pack(side=tk.LEFT, padx=4)
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 8))
+        self.schedule_button = ttk.Button(buttons, text="リマインダーを設定", command=self.schedule)
+        self.schedule_button.pack(side=tk.LEFT)
+        self.cancel_button = ttk.Button(buttons, text="設定を解除", command=self.cancel_schedule, state=tk.DISABLED)
+        self.cancel_button.pack(side=tk.LEFT, padx=(8, 0))
 
-    dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+        self.status_var = tk.StringVar(value="メッセージと通知時刻を設定してください。")
+        ttk.Label(frame, textvariable=self.status_var, foreground="#444").grid(
+            row=4, column=0, columnspan=4, sticky="w"
+        )
 
-    root.wait_window(dialog)
-    return selected["time"]
+    def schedule(self) -> None:
+        message = self.message_text.get("1.0", tk.END).strip()
+        if not message:
+            messagebox.showwarning("入力エラー", "表示したいメッセージを入力してください。")
+            return
 
+        target = datetime.time(hour=int(self.hour_var.get()), minute=int(self.minute_var.get()))
+        delay_ms = calculate_delay_ms(datetime.datetime.now(), target)
 
-def schedule_message(root: tk.Tk, message: str, target: datetime.time) -> None:
-    """指定時刻になったらメッセージを表示する。"""
-    now = datetime.datetime.now()
-    delay_ms = calculate_delay_ms(now, target)
+        self.cancel_schedule()
+        self.scheduled_job_id = self.root.after(delay_ms, lambda: self.show_reminder(message))
 
-    def show_reminder() -> None:
+        self.schedule_button.configure(state=tk.DISABLED)
+        self.cancel_button.configure(state=tk.NORMAL)
+        self.status_var.set(f"{target.hour:02d}:{target.minute:02d} に通知予定です。")
+
+    def cancel_schedule(self) -> None:
+        if self.scheduled_job_id is not None:
+            self.root.after_cancel(self.scheduled_job_id)
+            self.scheduled_job_id = None
+            self.status_var.set("リマインダー設定を解除しました。")
+
+        self.schedule_button.configure(state=tk.NORMAL)
+        self.cancel_button.configure(state=tk.DISABLED)
+
+    def show_reminder(self, message: str) -> None:
+        self.scheduled_job_id = None
+        self.schedule_button.configure(state=tk.NORMAL)
+        self.cancel_button.configure(state=tk.DISABLED)
+        self.status_var.set("通知を表示しました。次のリマインダーを設定できます。")
         messagebox.showinfo("リマインダー", message)
-        root.destroy()
-
-    root.after(delay_ms, show_reminder)
 
 
 def main() -> None:
     root = tk.Tk()
-    root.withdraw()
-
-    # ① 入力メッセージボックスを表示
-    message = simpledialog.askstring("入力", "表示したいメッセージを入力してください:", parent=root)
-    if not message:
-        root.destroy()
-        return
-
-    # ② 入力後、時間指定メニュー表示
-    target_time = ask_target_time(root)
-    if target_time is None:
-        root.destroy()
-        return
-
-    # ③ 時間設定後、現在時刻が同じになったらメッセージボックスで入力内容を表示
-    schedule_message(root, message, target_time)
-
-    wait_info = (
-        f"{target_time.hour:02d}:{target_time.minute:02d} にメッセージを表示します。\n"
-        "このままウィンドウを閉じずにお待ちください。"
-    )
-    messagebox.showinfo("設定完了", wait_info)
-
+    ReminderApp(root)
     root.mainloop()
 
 
