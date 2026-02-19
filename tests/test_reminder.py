@@ -1,7 +1,10 @@
 import datetime
 import unittest
+from unittest.mock import Mock
 
-from reminder import calculate_delay_ms
+import tkinter as tk
+
+from reminder import calculate_delay_ms, play_notification_sound
 
 
 class CalculateDelayMsTests(unittest.TestCase):
@@ -22,6 +25,23 @@ class CalculateDelayMsTests(unittest.TestCase):
         target = datetime.time(23, 58)
 
         self.assertEqual(calculate_delay_ms(now, target), 86_310_000)
+
+
+class PlayNotificationSoundTests(unittest.TestCase):
+    def test_calls_root_bell(self):
+        root = Mock()
+
+        play_notification_sound(root)
+
+        root.bell.assert_called_once_with()
+
+    def test_ignores_tcl_error(self):
+        root = Mock()
+        root.bell.side_effect = tk.TclError("bell is not available")
+
+        play_notification_sound(root)
+
+        root.bell.assert_called_once_with()
 
 
 if __name__ == "__main__":

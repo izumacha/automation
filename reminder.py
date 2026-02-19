@@ -17,6 +17,15 @@ def calculate_delay_ms(now: datetime.datetime, target: datetime.time) -> int:
     return int((target_dt - now).total_seconds() * 1000)
 
 
+def play_notification_sound(root: tk.Tk) -> None:
+    """通知音を再生する。"""
+    try:
+        root.bell()
+    except tk.TclError:
+        # 実行環境によっては bell が利用できないことがあるため無視する。
+        pass
+
+
 class ReminderApp:
     """リマインダー設定用のシンプルなGUIアプリ。"""
 
@@ -104,6 +113,7 @@ class ReminderApp:
         self.schedule_button.configure(state=tk.NORMAL)
         self.cancel_button.configure(state=tk.DISABLED)
         self.status_var.set("通知を表示しました。次のリマインダーを設定できます。")
+        play_notification_sound(self.root)
         messagebox.showinfo("リマインダー", message)
 
 
