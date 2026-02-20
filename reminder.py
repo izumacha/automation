@@ -1,5 +1,6 @@
 import base64
 import datetime
+import logging
 import os
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -14,8 +15,8 @@ def _set_window_icon(root: tk.Tk) -> None:
         png_data = cairosvg.svg2png(url=svg_path, output_width=64, output_height=64)
         icon = tk.PhotoImage(data=base64.b64encode(png_data))
         root.iconphoto(True, icon)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug("ウィンドウアイコンの設定をスキップしました: %s", e)
 
 
 def calculate_delay_ms(now: datetime.datetime, target: datetime.time) -> int:
@@ -108,19 +109,24 @@ class ReminderApp:
         target = datetime.time(hour=int(self.hour_var.get()), minute=int(self.minute_var.get()))
         delay_ms = calculate_delay_ms(datetime.datetime.now(), target)
 
-        self.cancel_schedule()
+        self._cancel_job()
         self.scheduled_job_id = self.root.after(delay_ms, lambda: self.show_reminder(message))
 
         self.schedule_button.configure(state=tk.DISABLED)
         self.cancel_button.configure(state=tk.NORMAL)
         self.status_var.set(f"{target.hour:02d}:{target.minute:02d} に通知予定です。")
 
-    def cancel_schedule(self) -> None:
+    def _cancel_job(self) -> None:
+        """スケジュール済みジョブをキャンセルする（UI 状態は変更しない）。"""
         if self.scheduled_job_id is not None:
             self.root.after_cancel(self.scheduled_job_id)
             self.scheduled_job_id = None
-            self.status_var.set("リマインダー設定を解除しました。")
 
+    def cancel_schedule(self) -> None:
+        if self.scheduled_job_id is None:
+            return
+        self._cancel_job()
+        self.status_var.set("リマインダー設定を解除しました。")
         self.schedule_button.configure(state=tk.NORMAL)
         self.cancel_button.configure(state=tk.DISABLED)
 
