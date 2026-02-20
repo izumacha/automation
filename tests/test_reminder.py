@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 import tkinter as tk
 
-from reminder import calculate_delay_ms, play_notification_sound
+from reminder import calculate_delay_ms, play_notification_sound, _set_window_icon
 
 
 class CalculateDelayMsTests(unittest.TestCase):
@@ -42,6 +42,13 @@ class PlayNotificationSoundTests(unittest.TestCase):
         play_notification_sound(root)
 
         root.bell.assert_called_once_with()
+
+
+class SetWindowIconTests(unittest.TestCase):
+    def test_does_not_raise_when_cairosvg_unavailable(self):
+        """cairosvg がない環境でもエラーにならないことを確認する。"""
+        root = Mock()
+        _set_window_icon(root)  # 例外が発生しないこと
 
 
 if __name__ == "__main__":

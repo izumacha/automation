@@ -1,6 +1,21 @@
+import base64
 import datetime
+import os
 import tkinter as tk
 from tkinter import messagebox, ttk
+
+
+def _set_window_icon(root: tk.Tk) -> None:
+    """SVG アイコンをウィンドウに設定する。変換ライブラリが無い場合は無視する。"""
+    try:
+        import cairosvg  # type: ignore[import]
+
+        svg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "reminder_icon.svg")
+        png_data = cairosvg.svg2png(url=svg_path, output_width=64, output_height=64)
+        icon = tk.PhotoImage(data=base64.b64encode(png_data))
+        root.iconphoto(True, icon)
+    except Exception:
+        pass
 
 
 def calculate_delay_ms(now: datetime.datetime, target: datetime.time) -> int:
@@ -32,6 +47,7 @@ class ReminderApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("リマインダー")
+        _set_window_icon(self.root)
         self.root.resizable(False, False)
         self.root.columnconfigure(0, weight=1)
 
