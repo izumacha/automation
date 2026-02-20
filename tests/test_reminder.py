@@ -48,7 +48,7 @@ class SetWindowIconTests(unittest.TestCase):
     def test_does_not_raise_when_cairosvg_unavailable(self):
         """cairosvg がない環境でもエラーにならないことを確認する。"""
         root = Mock()
-        _set_window_icon(root)  # must not raise
+        _set_window_icon(root)  # 例外が発生しないこと
 
 
 if __name__ == "__main__":
