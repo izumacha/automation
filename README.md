@@ -70,6 +70,39 @@ playwright install chromium
 
 ---
 
+## `reminder.py` をアプリとして使う手順（Linux）
+
+以下の手順で、ターミナルを開かずにランチャーから使えるアプリとして利用できます。
+
+1. 依存パッケージをインストール
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. リマインダーアプリをインストール（`.desktop` 作成）
+
+   ```bash
+   ./install_reminder_app.sh
+   ```
+
+3. アプリ一覧で **Reminder** を検索して起動
+   - 作成されるファイル: `~/.local/share/applications/reminder.desktop`
+   - アイコン: `assets/reminder_icon.svg`
+
+4. 初回起動後の使い方
+   - メッセージを入力
+   - 通知したい「時」「分」を選択
+   - **Set Reminder** を押す
+   - 通知時刻になるとダイアログと通知音で知らせる
+
+5. 設定を解除したい場合
+   - アプリ上の **Clear Reminder** を押す
+
+> 補足: `reminder.py` は、ターミナルから `python reminder.py` で直接起動することもできます。
+
+---
+
 ## テスト
 
 ```bash
