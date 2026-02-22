@@ -2,6 +2,8 @@ import base64
 import datetime
 import logging
 import os
+import platform
+import subprocess
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -35,6 +37,25 @@ def calculate_delay_ms(now: datetime.datetime, target: datetime.time) -> int:
 
 def play_notification_sound(root: tk.Tk) -> None:
     """通知音を再生する。"""
+    system_name = platform.system()
+    try:
+        if system_name == "Darwin":
+            # macOS 標準の通知音ファイルを優先して再生
+            subprocess.Popen(
+                ["/usr/bin/afplay", "/System/Library/Sounds/Glass.aiff"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return
+        if system_name == "Windows":
+            import winsound
+
+            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+            return
+    except Exception:
+        # OS 固有の再生に失敗した場合は bell にフォールバック
+        pass
+
     try:
         root.bell()
     except tk.TclError:
@@ -65,28 +86,36 @@ class ReminderApp:
         ttk.Label(frame, text="メッセージ").grid(row=0, column=0, sticky="w", pady=(0, 8))
         self.message_text = tk.Text(frame, width=36, height=5, wrap="word")
         self.message_text.grid(row=1, column=0, columnspan=4, sticky="ew")
+        self.message_text.bind("<Tab>", self._focus_next)
+        self.message_text.bind("<Shift-Tab>", self._focus_prev)
 
         ttk.Label(frame, text="通知時刻").grid(row=2, column=0, sticky="w", pady=(12, 8))
 
-        self.hour_menu = ttk.Combobox(
+        self.hour_menu = ttk.Spinbox(
             frame,
             textvariable=self.hour_var,
-            values=[f"{h:02d}" for h in range(24)],
-            state="readonly",
+            from_=0,
+            to=23,
+            wrap=True,
             width=4,
+            format="%02.0f",
         )
         self.hour_menu.grid(row=2, column=1, sticky="w", pady=(12, 8))
+        self.hour_menu.bind("<FocusOut>", lambda _event: self._normalize_time_inputs())
 
         ttk.Label(frame, text=":").grid(row=2, column=2, sticky="w", pady=(12, 8))
 
-        self.minute_menu = ttk.Combobox(
+        self.minute_menu = ttk.Spinbox(
             frame,
             textvariable=self.minute_var,
-            values=[f"{m:02d}" for m in range(60)],
-            state="readonly",
+            from_=0,
+            to=59,
+            wrap=True,
             width=4,
+            format="%02.0f",
         )
         self.minute_menu.grid(row=2, column=3, sticky="w", pady=(12, 8))
+        self.minute_menu.bind("<FocusOut>", lambda _event: self._normalize_time_inputs())
 
         buttons = ttk.Frame(frame)
         buttons.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 8))
@@ -99,6 +128,29 @@ class ReminderApp:
         ttk.Label(frame, textvariable=self.status_var, foreground="#444").grid(
             row=4, column=0, columnspan=4, sticky="w"
         )
+        self.root.bind("<Return>", lambda _event: self.schedule())
+        self.message_text.focus_set()
+
+    def _focus_next(self, _event: tk.Event) -> str:
+        self.root.focus_get().tk_focusNext().focus_set()
+        return "break"
+
+    def _focus_prev(self, _event: tk.Event) -> str:
+        self.root.focus_get().tk_focusPrev().focus_set()
+        return "break"
+
+    def _normalize_time_inputs(self) -> None:
+        """時刻入力値を範囲内に正規化して 2 桁表示にそろえる。"""
+        self.hour_var.set(f"{self._coerce_int(self.hour_var.get(), 0, 23):02d}")
+        self.minute_var.set(f"{self._coerce_int(self.minute_var.get(), 0, 59):02d}")
+
+    @staticmethod
+    def _coerce_int(raw: str, min_value: int, max_value: int) -> int:
+        try:
+            value = int(raw)
+        except ValueError:
+            return min_value
+        return max(min_value, min(max_value, value))
 
     def schedule(self) -> None:
         message = self.message_text.get("1.0", tk.END).strip()
@@ -106,6 +158,7 @@ class ReminderApp:
             messagebox.showwarning("入力エラー", "表示したいメッセージを入力してください。")
             return
 
+        self._normalize_time_inputs()
         target = datetime.time(hour=int(self.hour_var.get()), minute=int(self.minute_var.get()))
         delay_ms = calculate_delay_ms(datetime.datetime.now(), target)
 
