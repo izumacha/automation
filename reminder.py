@@ -7,6 +7,8 @@ import subprocess
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+DEFAULT_SNOOZE_MINUTES = 5
+
 
 def _set_window_icon(root: tk.Tk) -> None:
     """SVG アイコンをウィンドウに設定する。変換ライブラリが無い場合は無視する。"""
@@ -78,6 +80,7 @@ class ReminderApp:
         now = datetime.datetime.now()
         self.hour_var = tk.StringVar(value=f"{now.hour:02d}")
         self.minute_var = tk.StringVar(value=f"{now.minute:02d}")
+        self.snooze_var = tk.StringVar(value=str(DEFAULT_SNOOZE_MINUTES))
 
         frame = ttk.Frame(self.root, padding=16)
         frame.grid(sticky="nsew")
@@ -117,8 +120,20 @@ class ReminderApp:
         self.minute_menu.grid(row=2, column=3, sticky="w", pady=(12, 8))
         self.minute_menu.bind("<FocusOut>", lambda _event: self._normalize_time_inputs())
 
+        ttk.Label(frame, text="スヌーズ間隔（分）").grid(row=3, column=0, sticky="w", pady=(0, 8))
+        self.snooze_menu = ttk.Spinbox(
+            frame,
+            textvariable=self.snooze_var,
+            from_=1,
+            to=180,
+            wrap=True,
+            width=6,
+        )
+        self.snooze_menu.grid(row=3, column=1, sticky="w", pady=(0, 8))
+        self.snooze_menu.bind("<FocusOut>", lambda _event: self._normalize_snooze_input())
+
         buttons = ttk.Frame(frame)
-        buttons.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 8))
+        buttons.grid(row=4, column=0, columnspan=4, sticky="w", pady=(8, 8))
         self.schedule_button = ttk.Button(buttons, text="リマインダーを設定", command=self.schedule)
         self.schedule_button.pack(side=tk.LEFT)
         self.cancel_button = ttk.Button(buttons, text="設定を解除", command=self.cancel_schedule, state=tk.DISABLED)
@@ -126,7 +141,7 @@ class ReminderApp:
 
         self.status_var = tk.StringVar(value="メッセージと通知時刻を設定してください。")
         ttk.Label(frame, textvariable=self.status_var, foreground="#444").grid(
-            row=4, column=0, columnspan=4, sticky="w"
+            row=5, column=0, columnspan=4, sticky="w"
         )
         self.root.bind("<Return>", lambda _event: self.schedule())
         self.message_text.focus_set()
@@ -144,6 +159,10 @@ class ReminderApp:
         self.hour_var.set(f"{self._coerce_int(self.hour_var.get(), 0, 23):02d}")
         self.minute_var.set(f"{self._coerce_int(self.minute_var.get(), 0, 59):02d}")
 
+    def _normalize_snooze_input(self) -> None:
+        """スヌーズ間隔を 1〜180 分に正規化する。"""
+        self.snooze_var.set(str(self._coerce_int(self.snooze_var.get(), 1, 180)))
+
     @staticmethod
     def _coerce_int(raw: str, min_value: int, max_value: int) -> int:
         try:
@@ -151,6 +170,10 @@ class ReminderApp:
         except ValueError:
             return min_value
         return max(min_value, min(max_value, value))
+
+    def _get_snooze_minutes(self) -> int:
+        self._normalize_snooze_input()
+        return int(self.snooze_var.get())
 
     def schedule(self) -> None:
         message = self.message_text.get("1.0", tk.END).strip()
@@ -165,9 +188,10 @@ class ReminderApp:
         self._cancel_job()
         self.scheduled_job_id = self.root.after(delay_ms, lambda: self.show_reminder(message))
 
+        snooze_minutes = self._get_snooze_minutes()
         self.schedule_button.configure(state=tk.DISABLED)
         self.cancel_button.configure(state=tk.NORMAL)
-        self.status_var.set(f"{target.hour:02d}:{target.minute:02d} に通知予定です。")
+        self.status_var.set(f"{target.hour:02d}:{target.minute:02d} に通知予定です（スヌーズ: {snooze_minutes}分）。")
 
     def _cancel_job(self) -> None:
         """スケジュール済みジョブをキャンセルする（UI 状態は変更しない）。"""
@@ -187,9 +211,23 @@ class ReminderApp:
         self.scheduled_job_id = None
         self.schedule_button.configure(state=tk.NORMAL)
         self.cancel_button.configure(state=tk.DISABLED)
-        self.status_var.set("通知を表示しました。次のリマインダーを設定できます。")
         play_notification_sound(self.root)
         messagebox.showinfo("リマインダー", message)
+
+        snooze_minutes = self._get_snooze_minutes()
+        if messagebox.askyesno("スヌーズ", f"{snooze_minutes}分後に再通知しますか？"):
+            self._schedule_snooze(message, snooze_minutes)
+            return
+
+        self.status_var.set("通知を表示しました。次のリマインダーを設定できます。")
+
+    def _schedule_snooze(self, message: str, snooze_minutes: int) -> None:
+        self._cancel_job()
+        delay_ms = int(datetime.timedelta(minutes=snooze_minutes).total_seconds() * 1000)
+        self.scheduled_job_id = self.root.after(delay_ms, lambda: self.show_reminder(message))
+        self.schedule_button.configure(state=tk.DISABLED)
+        self.cancel_button.configure(state=tk.NORMAL)
+        self.status_var.set(f"スヌーズ中です。{snooze_minutes}分後に再通知します。")
 
 
 def main() -> None:
