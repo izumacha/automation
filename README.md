@@ -32,23 +32,6 @@
 
 ---
 
-### `browser_automation.py` — ブラウザ自動操作
-
-Playwright を使ってポートフォリオサイトから GitHub プロフィールへ自動で移動するスクリプトです。
-
-- **起動方法**
-
-  ```bash
-  python browser_automation.py
-  ```
-
-- **動作の流れ**
-  1. `https://izumacha.github.io/profile-portfolio/` を開く
-  2. ページ内の GitHub リンクを探してクリック（href → テキスト → アイコンの順に試行）
-  3. `https://github.com/izumacha` への遷移を確認して終了
-
----
-
 ## セットアップ
 
 ```bash
@@ -59,14 +42,7 @@ pip install -r requirements.txt
 
 | パッケージ | 用途 |
 |---|---|
-| `playwright` | ブラウザ自動操作 |
 | `cairosvg` | SVG アイコンの PNG 変換（`reminder.py` のウィンドウアイコン表示） |
-
-Playwright のブラウザバイナリは初回のみ別途インストールが必要です。
-
-```bash
-playwright install chromium
-```
 
 ---
 
@@ -93,11 +69,11 @@ playwright install chromium
 4. 初回起動後の使い方
    - メッセージを入力
    - 通知したい「時」「分」を選択
-   - **Set Reminder** を押す
+   - **リマインダーを設定** を押す
    - 通知時刻になるとダイアログと通知音で知らせる
 
 5. 設定を解除したい場合
-   - アプリ上の **Clear Reminder** を押す
+   - アプリ上の **設定を解除** を押す
 
 > 補足: `reminder.py` は、ターミナルから `python reminder.py` で直接起動することもできます。
 
@@ -106,14 +82,19 @@ playwright install chromium
 ## テスト
 
 ```bash
-python -m unittest discover tests
+python -m pytest tests
 ```
 
 `tests/test_reminder.py` では以下を検証しています。
 
-- `calculate_delay_ms` — 同分・未来・翌日ロールオーバーの境界値
-- `play_notification_sound` — 通知音の呼び出しと `TclError` の無視
+- `calculate_delay_ms` — 同分・未来・翌日ロールオーバー・深夜・1時間後の境界値
+- `play_notification_sound` — Linux / macOS / Windows 各パスの呼び出しと `TclError` の無視
 - `_set_window_icon` — `cairosvg` がない環境でも例外が発生しないこと
+- `_coerce_int` — 範囲内・範囲外・非数値・境界値の正規化
+- `_normalize_time_inputs` — 上限超過・負値・ゼロパディング・非数値のリセット
+- `schedule` — 空メッセージ時の警告・正常系のジョブ登録とボタン状態
+- `cancel_schedule` — ジョブなし時の無操作・アクティブジョブの解除
+- `show_reminder` / `_schedule_snooze` — スヌーズ選択時の再スケジュール・スヌーズ拒否時のステータス更新
 
 ---
 
@@ -122,8 +103,9 @@ python -m unittest discover tests
 ```
 automation/
 ├── reminder.py              # 時刻指定リマインダー GUI
-├── browser_automation.py    # ブラウザ自動操作スクリプト
+├── install_reminder_app.sh  # Linux 向けデスクトップエントリ生成
 ├── requirements.txt
+├── requirements-dev.txt     # 開発・テスト用依存
 ├── assets/
 │   └── reminder_icon.svg    # リマインダーアプリ用アイコン
 └── tests/
