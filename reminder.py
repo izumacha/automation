@@ -6,6 +6,7 @@ import logging
 import os
 import platform
 import subprocess
+import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -44,12 +45,15 @@ def play_notification_sound(root: tk.Tk) -> None:
     system_name = platform.system()
     try:
         if system_name == "Darwin":
-            proc = subprocess.Popen(
-                ["/usr/bin/afplay", "/System/Library/Sounds/Glass.aiff"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            proc.communicate()
+            def _play_and_wait() -> None:
+                proc = subprocess.Popen(
+                    ["/usr/bin/afplay", "/System/Library/Sounds/Glass.aiff"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                proc.wait()
+
+            threading.Thread(target=_play_and_wait, daemon=True).start()
             return
         if system_name == "Windows":
             import winsound
@@ -244,7 +248,7 @@ class ReminderApp:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.INFO)
     root = tk.Tk()
     ReminderApp(root)
     root.mainloop()
