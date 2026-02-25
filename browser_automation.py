@@ -4,70 +4,61 @@
 - サイト内の要素から https://github.com/izumacha に移動する
 """
 
-from playwright.sync_api import sync_playwright
-import time
+from __future__ import annotations
+
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+
+PORTFOLIO_URL = "https://izumacha.github.io/profile-portfolio/"
+GITHUB_URL_FRAGMENT = "github.com/izumacha"
+
+GITHUB_LINK_SELECTORS = [
+    'a[href*="github.com/izumacha"]',
+    'a:has-text("GitHub")',
+    'a:has([class*="github"]), a:has([class*="fa-github"])',
+]
 
 
-def main():
+def main() -> None:
     with sync_playwright() as p:
-        # ブラウザを起動（headless=Falseで画面表示）
         browser = p.chromium.launch(headless=False)
-        page = browser.new_page()
+        try:
+            page = browser.new_page()
 
-        # 1. ポートフォリオサイトを開く
-        print("ポートフォリオサイトを開いています...")
-        page.goto("https://izumacha.github.io/profile-portfolio/")
-        page.wait_for_load_state("networkidle")
-        print(f"現在のURL: {page.url}")
+            print("ポートフォリオサイトを開いています...")
+            page.goto(PORTFOLIO_URL, timeout=30_000)
+            page.wait_for_load_state("networkidle")
+            print(f"現在のURL: {page.url}")
 
-        # 少し待機してページを確認
-        time.sleep(2)
+            print("GitHubリンクを探しています...")
+            clicked = False
+            for selector in GITHUB_LINK_SELECTORS:
+                locator = page.locator(selector)
+                if locator.count() > 0:
+                    locator.first.click()
+                    clicked = True
+                    break
 
-        # 2. GitHubへのリンクを探してクリック
-        print("GitHubリンクを探しています...")
+            if not clicked:
+                print("GitHubリンクが見つかりませんでした")
+                return
 
-        # 方法1: href属性でGitHubリンクを直接探す
-        github_link = page.locator('a[href*="github.com/izumacha"]').first
+            page.wait_for_load_state("networkidle")
+            page.wait_for_url(f"**/{GITHUB_URL_FRAGMENT}**", timeout=10_000)
 
-        if github_link.count() > 0:
-            print("GitHubリンクを見つけました。クリックします...")
-            github_link.click()
-        else:
-            # 方法2: テキストで「GitHub」を含むリンクを探す
-            github_text_link = page.locator('a:has-text("GitHub")').first
-            if github_text_link.count() > 0:
-                print("'GitHub'テキストのリンクを見つけました。クリックします...")
-                github_text_link.click()
+            current_url = page.url
+            print(f"遷移後のURL: {current_url}")
+
+            if GITHUB_URL_FRAGMENT in current_url:
+                print("GitHubプロフィールページへの移動に成功しました！")
             else:
-                # 方法3: GitHubアイコン（SVGやi要素）を含むリンクを探す
-                github_icon_link = page.locator('a:has([class*="github"]), a:has([class*="fa-github"])').first
-                if github_icon_link.count() > 0:
-                    print("GitHubアイコンリンクを見つけました。クリックします...")
-                    github_icon_link.click()
-                else:
-                    print("GitHubリンクが見つかりませんでした")
-                    browser.close()
-                    return
-
-        # ページ遷移を待つ
-        page.wait_for_load_state("networkidle")
-        time.sleep(2)
-
-        # 3. 結果を確認
-        current_url = page.url
-        print(f"遷移後のURL: {current_url}")
-
-        if "github.com/izumacha" in current_url:
-            print("GitHubプロフィールページへの移動に成功しました！")
-        else:
-            print(f"予期しないURLに移動しました: {current_url}")
-
-        # 確認のため少し待機
-        time.sleep(3)
-
-        # ブラウザを閉じる
-        browser.close()
-        print("ブラウザを閉じました。")
+                print(f"予期しないURLに移動しました: {current_url}")
+        except PlaywrightTimeout as exc:
+            print(f"タイムアウトが発生しました: {exc}")
+        except Exception as exc:
+            print(f"予期しないエラーが発生しました: {exc}")
+        finally:
+            browser.close()
+            print("ブラウザを閉じました。")
 
 
 if __name__ == "__main__":
