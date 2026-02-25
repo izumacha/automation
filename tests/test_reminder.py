@@ -58,17 +58,15 @@ class PlayNotificationSoundTests(unittest.TestCase):
 
         root.bell.assert_called_once_with()
 
-    @patch("reminder.subprocess.Popen")
+    @patch("reminder.threading.Thread")
     @patch("reminder.platform.system", return_value="Darwin")
-    def test_plays_afplay_on_darwin(self, _mock_system, mock_popen):
+    def test_plays_afplay_on_darwin(self, _mock_system, mock_thread_cls):
         root = Mock()
-        mock_proc = Mock()
-        mock_popen.return_value = mock_proc
 
         play_notification_sound(root)
 
-        mock_popen.assert_called_once()
-        mock_proc.communicate.assert_called_once()
+        mock_thread_cls.assert_called_once()
+        mock_thread_cls.return_value.start.assert_called_once()
         root.bell.assert_not_called()
 
     @patch("reminder.platform.system", return_value="Windows")
@@ -111,7 +109,9 @@ class CoerceIntTests(unittest.TestCase):
 
 
 class _DummyVar:
-    def __init__(self, value: str):
+    """tk.StringVar のテスト用代替。Tk インスタンスなしで動作する。"""
+
+    def __init__(self, value: str = ""):
         self.value = value
 
     def get(self) -> str:
@@ -129,15 +129,17 @@ def _create_app(
     root = Mock()
     root.after.return_value = "job-1"
 
-    app = ReminderApp.__new__(ReminderApp)
-    app.root = root
-    app.scheduled_job_id = None
+    with patch.object(ReminderApp, "_build_ui"), \
+         patch("reminder.tk.StringVar", side_effect=lambda value="": _DummyVar(value)):
+        app = ReminderApp(root)
+
+    app.snooze_var.set(snooze_value)
+    app.hour_var.set(hour_value)
+    app.minute_var.set(minute_value)
+
     app.schedule_button = Mock()
     app.cancel_button = Mock()
     app.status_var = Mock()
-    app.snooze_var = _DummyVar(snooze_value)
-    app.hour_var = _DummyVar(hour_value)
-    app.minute_var = _DummyVar(minute_value)
     app.message_text = Mock()
     return app, root
 

@@ -76,17 +76,20 @@ class ReminderApp:
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("リマインダー")
-        _set_window_icon(self.root)
-        self.root.resizable(False, False)
-        self.root.columnconfigure(0, weight=1)
-
         self.scheduled_job_id: str | None = None
 
         now = datetime.datetime.now()
         self.hour_var = tk.StringVar(value=f"{now.hour:02d}")
         self.minute_var = tk.StringVar(value=f"{now.minute:02d}")
         self.snooze_var = tk.StringVar(value=str(DEFAULT_SNOOZE_MINUTES))
+
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        self.root.title("リマインダー")
+        _set_window_icon(self.root)
+        self.root.resizable(False, False)
+        self.root.columnconfigure(0, weight=1)
 
         frame = ttk.Frame(self.root, padding=16)
         frame.grid(sticky="nsew")
