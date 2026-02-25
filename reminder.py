@@ -6,6 +6,7 @@ import logging
 import os
 import platform
 import subprocess
+import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -44,12 +45,15 @@ def play_notification_sound(root: tk.Tk) -> None:
     system_name = platform.system()
     try:
         if system_name == "Darwin":
-            proc = subprocess.Popen(
-                ["/usr/bin/afplay", "/System/Library/Sounds/Glass.aiff"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            proc.communicate()
+            def _play_and_wait() -> None:
+                proc = subprocess.Popen(
+                    ["/usr/bin/afplay", "/System/Library/Sounds/Glass.aiff"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                proc.wait()
+
+            threading.Thread(target=_play_and_wait, daemon=True).start()
             return
         if system_name == "Windows":
             import winsound
@@ -72,17 +76,20 @@ class ReminderApp:
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("リマインダー")
-        _set_window_icon(self.root)
-        self.root.resizable(False, False)
-        self.root.columnconfigure(0, weight=1)
-
         self.scheduled_job_id: str | None = None
 
         now = datetime.datetime.now()
         self.hour_var = tk.StringVar(value=f"{now.hour:02d}")
         self.minute_var = tk.StringVar(value=f"{now.minute:02d}")
         self.snooze_var = tk.StringVar(value=str(DEFAULT_SNOOZE_MINUTES))
+
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        self.root.title("リマインダー")
+        _set_window_icon(self.root)
+        self.root.resizable(False, False)
+        self.root.columnconfigure(0, weight=1)
 
         frame = ttk.Frame(self.root, padding=16)
         frame.grid(sticky="nsew")
@@ -244,7 +251,7 @@ class ReminderApp:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.INFO)
     root = tk.Tk()
     ReminderApp(root)
     root.mainloop()
