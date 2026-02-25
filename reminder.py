@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import base64
 import datetime
 import logging
@@ -42,12 +44,12 @@ def play_notification_sound(root: tk.Tk) -> None:
     system_name = platform.system()
     try:
         if system_name == "Darwin":
-            # macOS 標準の通知音ファイルを優先して再生
-            subprocess.Popen(
+            proc = subprocess.Popen(
                 ["/usr/bin/afplay", "/System/Library/Sounds/Glass.aiff"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+            proc.communicate()
             return
         if system_name == "Windows":
             import winsound
@@ -147,11 +149,15 @@ class ReminderApp:
         self.message_text.focus_set()
 
     def _focus_next(self, _event: tk.Event) -> str:
-        self.root.focus_get().tk_focusNext().focus_set()
+        widget = self.root.focus_get()
+        if widget is not None:
+            widget.tk_focusNext().focus_set()
         return "break"
 
     def _focus_prev(self, _event: tk.Event) -> str:
-        self.root.focus_get().tk_focusPrev().focus_set()
+        widget = self.root.focus_get()
+        if widget is not None:
+            widget.tk_focusPrev().focus_set()
         return "break"
 
     def _normalize_time_inputs(self) -> None:
@@ -185,10 +191,13 @@ class ReminderApp:
         target = datetime.time(hour=int(self.hour_var.get()), minute=int(self.minute_var.get()))
         delay_ms = calculate_delay_ms(datetime.datetime.now(), target)
 
-        self._cancel_job()
-        self.scheduled_job_id = self.root.after(delay_ms, lambda: self.show_reminder(message))
-
         snooze_minutes = self._get_snooze_minutes()
+
+        self._cancel_job()
+        self.scheduled_job_id = self.root.after(
+            delay_ms, lambda: self.show_reminder(message, snooze_minutes)
+        )
+
         self.schedule_button.configure(state=tk.DISABLED)
         self.cancel_button.configure(state=tk.NORMAL)
         self.status_var.set(f"{target.hour:02d}:{target.minute:02d} に通知予定です（スヌーズ: {snooze_minutes}分）。")
@@ -207,14 +216,16 @@ class ReminderApp:
         self.schedule_button.configure(state=tk.NORMAL)
         self.cancel_button.configure(state=tk.DISABLED)
 
-    def show_reminder(self, message: str) -> None:
+    def show_reminder(self, message: str, snooze_minutes: int | None = None) -> None:
+        if snooze_minutes is None:
+            snooze_minutes = self._get_snooze_minutes()
+
         self.scheduled_job_id = None
         self.schedule_button.configure(state=tk.NORMAL)
         self.cancel_button.configure(state=tk.DISABLED)
         play_notification_sound(self.root)
         messagebox.showinfo("リマインダー", message)
 
-        snooze_minutes = self._get_snooze_minutes()
         if messagebox.askyesno("スヌーズ", f"{snooze_minutes}分後に再通知しますか？"):
             self._schedule_snooze(message, snooze_minutes)
             return
@@ -224,13 +235,16 @@ class ReminderApp:
     def _schedule_snooze(self, message: str, snooze_minutes: int) -> None:
         self._cancel_job()
         delay_ms = int(datetime.timedelta(minutes=snooze_minutes).total_seconds() * 1000)
-        self.scheduled_job_id = self.root.after(delay_ms, lambda: self.show_reminder(message))
+        self.scheduled_job_id = self.root.after(
+            delay_ms, lambda: self.show_reminder(message, snooze_minutes)
+        )
         self.schedule_button.configure(state=tk.DISABLED)
         self.cancel_button.configure(state=tk.NORMAL)
         self.status_var.set(f"スヌーズ中です。{snooze_minutes}分後に再通知します。")
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.DEBUG)
     root = tk.Tk()
     ReminderApp(root)
     root.mainloop()
