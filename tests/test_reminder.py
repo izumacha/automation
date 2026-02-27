@@ -1,6 +1,7 @@
 import datetime
 import unittest
 from unittest.mock import Mock, patch
+import types
 
 import tkinter as tk
 
@@ -83,6 +84,18 @@ class SetWindowIconTests(unittest.TestCase):
         """cairosvg がない環境でもエラーにならないことを確認する。"""
         root = Mock()
         _set_window_icon(root)
+
+    @patch("reminder.tk.PhotoImage")
+    @patch.dict("sys.modules", {"cairosvg": types.SimpleNamespace(svg2png=Mock(return_value=b"png-data"))})
+    def test_keeps_icon_reference_on_root(self, mock_photo_image):
+        root = Mock()
+        icon = Mock()
+        mock_photo_image.return_value = icon
+
+        _set_window_icon(root)
+
+        self.assertIs(root._icon_image, icon)
+        root.iconphoto.assert_called_once_with(True, icon)
 
 
 class CoerceIntTests(unittest.TestCase):
