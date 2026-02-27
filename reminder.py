@@ -21,6 +21,8 @@ def _set_window_icon(root: tk.Tk) -> None:
         svg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "reminder_icon.svg")
         png_data = cairosvg.svg2png(url=svg_path, output_width=64, output_height=64)
         icon = tk.PhotoImage(data=base64.b64encode(png_data))
+        # Tk 側で画像が解放されないように参照を保持する。
+        root._icon_image = icon  # type: ignore[attr-defined]
         root.iconphoto(True, icon)
     except Exception as e:
         logging.debug("ウィンドウアイコンの設定をスキップしました: %s", e)
