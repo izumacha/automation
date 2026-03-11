@@ -349,5 +349,20 @@ class ReminderAppSnoozeTests(unittest.TestCase):
         root.after.assert_called_once()
 
 
+class MainTests(unittest.TestCase):
+    @patch("reminder.ReminderApp")
+    @patch("reminder.tk.Tk")
+    def test_main_creates_reminder_app_and_starts_mainloop(self, mock_tk_cls, mock_app_cls):
+        mock_root = Mock()
+        mock_tk_cls.return_value = mock_root
+
+        from reminder import main
+        main()
+
+        mock_tk_cls.assert_called_once()
+        mock_app_cls.assert_called_once_with(mock_root)
+        mock_root.mainloop.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
