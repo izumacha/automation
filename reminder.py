@@ -201,9 +201,13 @@ class ReminderApp:
         snooze_minutes = self._get_snooze_minutes()
 
         self._cancel_job()
-        self.scheduled_job_id = self.root.after(
-            delay_ms, lambda: self.show_reminder(message, snooze_minutes)
-        )
+        try:
+            self.scheduled_job_id = self.root.after(
+                delay_ms, lambda: self.show_reminder(message, snooze_minutes)
+            )
+        except Exception:
+            self._reset_to_idle()
+            raise
 
         self.schedule_button.configure(state=tk.DISABLED)
         self.cancel_button.configure(state=tk.NORMAL)
@@ -214,6 +218,13 @@ class ReminderApp:
         if self.scheduled_job_id is not None:
             self.root.after_cancel(self.scheduled_job_id)
             self.scheduled_job_id = None
+
+    def _reset_to_idle(self) -> None:
+        """ジョブをキャンセルし、UI をアイドル状態に戻す。"""
+        self._cancel_job()
+        self.schedule_button.configure(state=tk.NORMAL)
+        self.cancel_button.configure(state=tk.DISABLED)
+        self.status_var.set("メッセージと通知時刻を設定してください。")
 
     def cancel_schedule(self) -> None:
         if self.scheduled_job_id is None:

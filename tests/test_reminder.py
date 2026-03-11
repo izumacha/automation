@@ -200,6 +200,19 @@ class ScheduleTests(unittest.TestCase):
         app.cancel_button.configure.assert_called_with(state=tk.NORMAL)
         self.assertIsNotNone(app.scheduled_job_id)
 
+    @patch("reminder.calculate_delay_ms", return_value=60_000)
+    def test_schedule_resets_ui_when_root_after_raises(self, _mock_delay):
+        app, root = _create_app()
+        app.message_text.get.return_value = "テストメッセージ"
+        root.after.side_effect = RuntimeError("after failed")
+
+        with self.assertRaises(RuntimeError):
+            app.schedule()
+
+        self.assertIsNone(app.scheduled_job_id)
+        app.schedule_button.configure.assert_called_with(state=tk.NORMAL)
+        app.cancel_button.configure.assert_called_with(state=tk.DISABLED)
+
 
 class CancelScheduleTests(unittest.TestCase):
     def test_cancel_when_no_job_does_nothing(self):
