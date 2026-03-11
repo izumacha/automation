@@ -1,11 +1,12 @@
 import datetime
+import subprocess
 import unittest
 from unittest.mock import Mock, patch
 import types
 
 import tkinter as tk
 
-from reminder import ReminderApp, _set_window_icon, calculate_delay_ms, play_notification_sound
+from reminder import MAX_SNOOZE_COUNT, ReminderApp, _set_window_icon, calculate_delay_ms, play_notification_sound
 
 
 class CalculateDelayMsTests(unittest.TestCase):
@@ -42,18 +43,42 @@ class CalculateDelayMsTests(unittest.TestCase):
 
 
 class PlayNotificationSoundTests(unittest.TestCase):
+    @patch("reminder.subprocess.Popen")
     @patch("reminder.platform.system", return_value="Linux")
-    def test_calls_root_bell_on_linux(self, _mock_system):
+    def test_calls_root_bell_on_linux(self, _mock_system, _mock_popen):
         root = Mock()
 
         play_notification_sound(root)
 
         root.bell.assert_called_once_with()
 
+    @patch("reminder.subprocess.Popen")
     @patch("reminder.platform.system", return_value="Linux")
-    def test_ignores_tcl_error(self, _mock_system):
+    def test_ignores_tcl_error(self, _mock_system, _mock_popen):
         root = Mock()
         root.bell.side_effect = tk.TclError("bell is not available")
+
+        play_notification_sound(root)
+
+        root.bell.assert_called_once_with()
+
+    @patch("reminder.subprocess.Popen")
+    @patch("reminder.platform.system", return_value="Linux")
+    def test_sends_notify_send_on_linux(self, _mock_system, mock_popen):
+        root = Mock()
+
+        play_notification_sound(root)
+
+        mock_popen.assert_called_once_with(
+            ["notify-send", "--urgency=normal", "リマインダー"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    @patch("reminder.subprocess.Popen", side_effect=FileNotFoundError)
+    @patch("reminder.platform.system", return_value="Linux")
+    def test_notify_send_not_found_still_rings_bell(self, _mock_system, _mock_popen):
+        root = Mock()
 
         play_notification_sound(root)
 
@@ -310,6 +335,31 @@ class ReminderAppSnoozeTests(unittest.TestCase):
 
         self.assertEqual(minutes, 180)
         self.assertEqual(app.snooze_var.get(), "180")
+
+    @patch("reminder.play_notification_sound")
+    @patch("reminder.messagebox.showinfo")
+    def test_show_reminder_skips_snooze_dialog_at_max_snooze_count(self, _mock_showinfo, _mock_sound):
+        app, root = _create_app(snooze_value="5")
+
+        with patch("reminder.messagebox.askyesno") as mock_askyesno:
+            app.show_reminder("テスト", snooze_minutes=5, snooze_count=MAX_SNOOZE_COUNT)
+
+        mock_askyesno.assert_not_called()
+        root.after.assert_not_called()
+        app.status_var.set.assert_called_with("通知を表示しました。次のリマインダーを設定できます。")
+
+    @patch("reminder.play_notification_sound")
+    @patch("reminder.messagebox.askyesno", return_value=True)
+    @patch("reminder.messagebox.showinfo")
+    def test_show_reminder_allows_snooze_below_max_snooze_count(
+        self, _mock_showinfo, _mock_askyesno, _mock_sound
+    ):
+        app, root = _create_app(snooze_value="5")
+
+        app.show_reminder("テスト", snooze_minutes=5, snooze_count=MAX_SNOOZE_COUNT - 1)
+
+        _mock_askyesno.assert_called_once_with("スヌーズ", "5分後に再通知しますか？")
+        root.after.assert_called_once()
 
 
 if __name__ == "__main__":

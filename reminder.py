@@ -11,6 +11,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 DEFAULT_SNOOZE_MINUTES = 5
+MAX_SNOOZE_COUNT = 10
 
 
 def _set_window_icon(root: tk.Tk) -> None:
@@ -62,6 +63,16 @@ def play_notification_sound(root: tk.Tk) -> None:
 
             winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
             return
+        if system_name == "Linux":
+            try:
+                subprocess.Popen(
+                    ["notify-send", "--urgency=normal", "リマインダー"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                # notify-send が利用できない場合は bell にフォールバック
+                pass
     except Exception:
         # OS 固有の再生に失敗した場合は bell にフォールバック
         pass
@@ -236,7 +247,7 @@ class ReminderApp:
         self.schedule_button.configure(state=tk.NORMAL)
         self.cancel_button.configure(state=tk.DISABLED)
 
-    def show_reminder(self, message: str, snooze_minutes: int | None = None) -> None:
+    def show_reminder(self, message: str, snooze_minutes: int | None = None, snooze_count: int = 0) -> None:
         if snooze_minutes is None:
             snooze_minutes = self._get_snooze_minutes()
 
@@ -246,17 +257,17 @@ class ReminderApp:
         play_notification_sound(self.root)
         messagebox.showinfo("リマインダー", message)
 
-        if messagebox.askyesno("スヌーズ", f"{snooze_minutes}分後に再通知しますか？"):
-            self._schedule_snooze(message, snooze_minutes)
+        if snooze_count < MAX_SNOOZE_COUNT and messagebox.askyesno("スヌーズ", f"{snooze_minutes}分後に再通知しますか？"):
+            self._schedule_snooze(message, snooze_minutes, snooze_count + 1)
             return
 
         self.status_var.set("通知を表示しました。次のリマインダーを設定できます。")
 
-    def _schedule_snooze(self, message: str, snooze_minutes: int) -> None:
+    def _schedule_snooze(self, message: str, snooze_minutes: int, snooze_count: int) -> None:
         self._cancel_job()
         delay_ms = int(datetime.timedelta(minutes=snooze_minutes).total_seconds() * 1000)
         self.scheduled_job_id = self.root.after(
-            delay_ms, lambda: self.show_reminder(message, snooze_minutes)
+            delay_ms, lambda: self.show_reminder(message, snooze_minutes, snooze_count)
         )
         self.schedule_button.configure(state=tk.DISABLED)
         self.cancel_button.configure(state=tk.NORMAL)
