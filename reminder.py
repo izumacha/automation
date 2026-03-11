@@ -108,14 +108,24 @@ class ReminderApp:
         frame.grid(sticky="nsew")
         frame.columnconfigure(1, weight=1)
 
+        self._build_message_section(frame)
+        self._build_time_section(frame)
+        self._build_snooze_section(frame)
+        self._build_buttons_section(frame)
+        self._build_status_section(frame)
+
+        self.root.bind("<Return>", lambda _event: self.schedule())
+        self.message_text.focus_set()
+
+    def _build_message_section(self, frame: ttk.Frame) -> None:
         ttk.Label(frame, text="メッセージ").grid(row=0, column=0, sticky="w", pady=(0, 8))
         self.message_text = tk.Text(frame, width=36, height=5, wrap="word")
         self.message_text.grid(row=1, column=0, columnspan=4, sticky="ew")
         self.message_text.bind("<Tab>", self._focus_next)
         self.message_text.bind("<Shift-Tab>", self._focus_prev)
 
+    def _build_time_section(self, frame: ttk.Frame) -> None:
         ttk.Label(frame, text="通知時刻").grid(row=2, column=0, sticky="w", pady=(12, 8))
-
         self.hour_menu = ttk.Spinbox(
             frame,
             textvariable=self.hour_var,
@@ -142,6 +152,7 @@ class ReminderApp:
         self.minute_menu.grid(row=2, column=3, sticky="w", pady=(12, 8))
         self.minute_menu.bind("<FocusOut>", lambda _event: self._normalize_time_inputs())
 
+    def _build_snooze_section(self, frame: ttk.Frame) -> None:
         ttk.Label(frame, text="スヌーズ間隔（分）").grid(row=3, column=0, sticky="w", pady=(0, 8))
         self.snooze_menu = ttk.Spinbox(
             frame,
@@ -154,6 +165,7 @@ class ReminderApp:
         self.snooze_menu.grid(row=3, column=1, sticky="w", pady=(0, 8))
         self.snooze_menu.bind("<FocusOut>", lambda _event: self._normalize_snooze_input())
 
+    def _build_buttons_section(self, frame: ttk.Frame) -> None:
         buttons = ttk.Frame(frame)
         buttons.grid(row=4, column=0, columnspan=4, sticky="w", pady=(8, 8))
         self.schedule_button = ttk.Button(buttons, text="リマインダーを設定", command=self.schedule)
@@ -161,12 +173,11 @@ class ReminderApp:
         self.cancel_button = ttk.Button(buttons, text="設定を解除", command=self.cancel_schedule, state=tk.DISABLED)
         self.cancel_button.pack(side=tk.LEFT, padx=(8, 0))
 
+    def _build_status_section(self, frame: ttk.Frame) -> None:
         self.status_var = tk.StringVar(value="メッセージと通知時刻を設定してください。")
         ttk.Label(frame, textvariable=self.status_var, foreground="#444").grid(
             row=5, column=0, columnspan=4, sticky="w"
         )
-        self.root.bind("<Return>", lambda _event: self.schedule())
-        self.message_text.focus_set()
 
     def _focus_next(self, _event: tk.Event) -> str:
         widget = self.root.focus_get()
