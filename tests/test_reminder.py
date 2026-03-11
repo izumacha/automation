@@ -348,6 +348,103 @@ class ReminderAppSnoozeTests(unittest.TestCase):
         _mock_askyesno.assert_called_once_with("スヌーズ", "5分後に再通知しますか？")
         root.after.assert_called_once()
 
+    def test_schedule_snooze_resets_ui_when_root_after_raises(self):
+        app, root = _create_app()
+        root.after.side_effect = RuntimeError("after failed")
+
+        with self.assertRaises(RuntimeError):
+            app._schedule_snooze("テスト", 5, 0)
+
+        self.assertIsNone(app.scheduled_job_id)
+        app.schedule_button.configure.assert_called_with(state=tk.NORMAL)
+        app.cancel_button.configure.assert_called_with(state=tk.DISABLED)
+
+
+class BuildSectionTests(unittest.TestCase):
+    def setUp(self):
+        root = Mock()
+        with patch.object(ReminderApp, "_build_ui"), \
+             patch("reminder.tk.StringVar", side_effect=lambda value="": _DummyVar(value)):
+            self.app = ReminderApp(root)
+        self.frame = Mock()
+
+    def test_build_message_section_creates_message_text(self):
+        self.app._build_message_section(self.frame)
+
+        self.assertTrue(hasattr(self.app, "message_text"))
+
+    def test_build_message_section_binds_tab_keys(self):
+        self.app._build_message_section(self.frame)
+
+        bound_events = [call.args[0] for call in self.app.message_text.bind.call_args_list]
+        self.assertIn("<Tab>", bound_events)
+        self.assertIn("<Shift-Tab>", bound_events)
+
+    def test_build_time_section_creates_hour_and_minute_menus(self):
+        self.app._build_time_section(self.frame)
+
+        self.assertTrue(hasattr(self.app, "hour_menu"))
+        self.assertTrue(hasattr(self.app, "minute_menu"))
+
+    def test_build_snooze_section_creates_snooze_menu(self):
+        self.app._build_snooze_section(self.frame)
+
+        self.assertTrue(hasattr(self.app, "snooze_menu"))
+
+    def test_build_buttons_section_creates_both_buttons(self):
+        self.app._build_buttons_section(self.frame)
+
+        self.assertTrue(hasattr(self.app, "schedule_button"))
+        self.assertTrue(hasattr(self.app, "cancel_button"))
+
+    def test_build_status_section_sets_initial_message(self):
+        with patch("reminder.tk.StringVar", side_effect=lambda value="": _DummyVar(value)):
+            self.app._build_status_section(self.frame)
+
+        self.assertEqual(self.app.status_var.get(), "メッセージと通知時刻を設定してください。")
+
+
+class FocusNavigationTests(unittest.TestCase):
+    def test_focus_next_moves_to_next_widget(self):
+        app, root = _create_app()
+        next_widget = Mock()
+        current_widget = Mock()
+        current_widget.tk_focusNext.return_value = next_widget
+        root.focus_get.return_value = current_widget
+
+        result = app._focus_next(Mock())
+
+        next_widget.focus_set.assert_called_once()
+        self.assertEqual(result, "break")
+
+    def test_focus_next_returns_break_when_no_focused_widget(self):
+        app, root = _create_app()
+        root.focus_get.return_value = None
+
+        result = app._focus_next(Mock())
+
+        self.assertEqual(result, "break")
+
+    def test_focus_prev_moves_to_prev_widget(self):
+        app, root = _create_app()
+        prev_widget = Mock()
+        current_widget = Mock()
+        current_widget.tk_focusPrev.return_value = prev_widget
+        root.focus_get.return_value = current_widget
+
+        result = app._focus_prev(Mock())
+
+        prev_widget.focus_set.assert_called_once()
+        self.assertEqual(result, "break")
+
+    def test_focus_prev_returns_break_when_no_focused_widget(self):
+        app, root = _create_app()
+        root.focus_get.return_value = None
+
+        result = app._focus_prev(Mock())
+
+        self.assertEqual(result, "break")
+
 
 class MainTests(unittest.TestCase):
     @patch("reminder.ReminderApp")

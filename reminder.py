@@ -273,11 +273,14 @@ class ReminderApp:
         self.status_var.set("通知を表示しました。次のリマインダーを設定できます。")
 
     def _schedule_snooze(self, message: str, snooze_minutes: int, snooze_count: int) -> None:
-        self._cancel_job()
         delay_ms = int(datetime.timedelta(minutes=snooze_minutes).total_seconds() * 1000)
-        self.scheduled_job_id = self.root.after(
-            delay_ms, lambda: self.show_reminder(message, snooze_minutes, snooze_count)
-        )
+        try:
+            self.scheduled_job_id = self.root.after(
+                delay_ms, lambda: self.show_reminder(message, snooze_minutes, snooze_count)
+            )
+        except Exception:
+            self._reset_to_idle()
+            raise
         self.schedule_button.configure(state=tk.DISABLED)
         self.cancel_button.configure(state=tk.NORMAL)
         self.status_var.set(f"スヌーズ中です。{snooze_minutes}分後に再通知します。")
