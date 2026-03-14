@@ -1,3 +1,24 @@
+"""tests/test_reminder.py — reminder.py のユニットテスト
+
+テスト方針:
+- tkinter への依存を排除するため、tests/conftest.py で tkinter をモック化する
+- GUI ウィジェットの生成は _build_ui をパッチして省略し、
+  ロジック層（スケジューリング・バリデーション・スヌーズ）を直接テストする
+- _DummyVar で tk.StringVar を代替し、Tk インスタンスなしで状態変化を検証する
+
+テストクラス一覧:
+    CalculateDelayMsTests   : calculate_delay_ms() の単体テスト
+    PlayNotificationSoundTests : play_notification_sound() のプラットフォーム別テスト
+    SetWindowIconTests      : _set_window_icon() の単体テスト
+    CoerceIntTests          : ReminderApp._coerce_int() の単体テスト
+    NormalizeTimeInputsTests: _normalize_time_inputs() の単体テスト
+    ScheduleTests           : schedule() の動作テスト
+    CancelScheduleTests     : cancel_schedule() の動作テスト
+    ReminderAppSnoozeTests  : show_reminder() / _schedule_snooze() のテスト
+    BuildSectionTests       : _build_*_section() の UI 構築テスト
+    FocusNavigationTests    : _focus_next() / _focus_prev() のテスト
+    MainTests               : main() のテスト
+"""
 import datetime
 import subprocess
 import unittest
@@ -9,6 +30,8 @@ from reminder import MAX_SNOOZE_COUNT, ReminderApp, _set_window_icon, calculate_
 
 
 class CalculateDelayMsTests(unittest.TestCase):
+    """calculate_delay_ms() の計算結果と翌日ロールオーバーを検証する。"""
+
     def test_same_minute_returns_zero(self):
         now = datetime.datetime(2026, 1, 1, 10, 30, 45)
         target = datetime.time(10, 30)
@@ -16,18 +39,21 @@ class CalculateDelayMsTests(unittest.TestCase):
         self.assertEqual(calculate_delay_ms(now, target), 0)
 
     def test_future_time_same_day(self):
+        # 10:30:45 → 10:31:00 は 15 秒 = 15,000ms
         now = datetime.datetime(2026, 1, 1, 10, 30, 45)
         target = datetime.time(10, 31)
 
         self.assertEqual(calculate_delay_ms(now, target), 15_000)
 
     def test_past_time_rolls_to_next_day(self):
+        # 23:59:30 に 23:58 を指定 → 翌日 23:58:00 まで 23h58m30s = 86,310,000ms
         now = datetime.datetime(2026, 1, 1, 23, 59, 30)
         target = datetime.time(23, 58)
 
         self.assertEqual(calculate_delay_ms(now, target), 86_310_000)
 
     def test_midnight_target_from_late_evening(self):
+        # 23:00:00 から 00:00 は 1 時間
         now = datetime.datetime(2026, 1, 1, 23, 0, 0)
         target = datetime.time(0, 0)
 
@@ -42,6 +68,8 @@ class CalculateDelayMsTests(unittest.TestCase):
 
 
 class PlayNotificationSoundTests(unittest.TestCase):
+    """play_notification_sound() のプラットフォーム別フォールバックを検証する。"""
+
     @patch("reminder.subprocess.Popen")
     @patch("reminder.platform.system", return_value="Linux")
     def test_calls_root_bell_on_linux(self, _mock_system, _mock_popen):
@@ -54,6 +82,7 @@ class PlayNotificationSoundTests(unittest.TestCase):
     @patch("reminder.subprocess.Popen")
     @patch("reminder.platform.system", return_value="Linux")
     def test_ignores_tcl_error(self, _mock_system, _mock_popen):
+        # bell が TclError を送出しても例外が伝播しないことを確認する
         root = Mock()
         root.bell.side_effect = tk.TclError("bell is not available")
 
@@ -77,6 +106,7 @@ class PlayNotificationSoundTests(unittest.TestCase):
     @patch("reminder.subprocess.Popen", side_effect=FileNotFoundError)
     @patch("reminder.platform.system", return_value="Linux")
     def test_notify_send_not_found_still_rings_bell(self, _mock_system, _mock_popen):
+        # notify-send が存在しない環境でも bell にフォールバックすることを確認する
         root = Mock()
 
         play_notification_sound(root)
@@ -86,6 +116,7 @@ class PlayNotificationSoundTests(unittest.TestCase):
     @patch("reminder.threading.Thread")
     @patch("reminder.platform.system", return_value="Darwin")
     def test_plays_afplay_on_darwin(self, _mock_system, mock_thread_cls):
+        # macOS では afplay を別スレッドで起動し、bell は呼ばないことを確認する
         root = Mock()
 
         play_notification_sound(root)
@@ -96,6 +127,7 @@ class PlayNotificationSoundTests(unittest.TestCase):
 
     @patch("reminder.platform.system", return_value="Windows")
     def test_falls_back_to_bell_when_winsound_unavailable(self, _mock_system):
+        # Windows 環境で winsound が利用できない場合は bell にフォールバックする
         root = Mock()
 
         play_notification_sound(root)
@@ -104,6 +136,8 @@ class PlayNotificationSoundTests(unittest.TestCase):
 
 
 class SetWindowIconTests(unittest.TestCase):
+    """_set_window_icon() の挙動を検証する。"""
+
     def test_does_not_raise_when_cairosvg_unavailable(self):
         """cairosvg がない環境でもエラーにならないことを確認する。"""
         root = Mock()
@@ -111,6 +145,8 @@ class SetWindowIconTests(unittest.TestCase):
 
 
 class CoerceIntTests(unittest.TestCase):
+    """_coerce_int() の変換・クランプ動作を検証する。"""
+
     def test_value_within_range(self):
         self.assertEqual(ReminderApp._coerce_int("10", 0, 23), 10)
 
@@ -151,6 +187,19 @@ def _create_app(
     hour_value: str = "10",
     minute_value: str = "30",
 ):
+    """テスト用の ReminderApp インスタンスを生成するヘルパー。
+
+    _build_ui をパッチで無効化し、UI ウィジェットをすべて Mock に差し替えることで
+    tkinter を起動せずにロジック層のみをテストできる状態を作る。
+
+    Args:
+        snooze_value: snooze_var の初期値（分）。
+        hour_value:   hour_var の初期値（時）。
+        minute_value: minute_var の初期値（分）。
+
+    Returns:
+        (app, root) のタプル。root は Mock オブジェクト。
+    """
     root = Mock()
     root.after.return_value = "job-1"
 
@@ -162,6 +211,7 @@ def _create_app(
     app.hour_var.set(hour_value)
     app.minute_var.set(minute_value)
 
+    # UI ウィジェットをすべて Mock に差し替えて状態変化を記録できるようにする
     app.schedule_button = Mock()
     app.cancel_button = Mock()
     app.status_var = Mock()
@@ -170,6 +220,8 @@ def _create_app(
 
 
 class NormalizeTimeInputsTests(unittest.TestCase):
+    """_normalize_time_inputs() の正規化・ゼロ埋め動作を検証する。"""
+
     def test_normalizes_hour_above_23(self):
         app, _ = _create_app(hour_value="30", minute_value="05")
 
@@ -203,6 +255,8 @@ class NormalizeTimeInputsTests(unittest.TestCase):
 
 
 class ScheduleTests(unittest.TestCase):
+    """schedule() のバリデーション・ジョブ登録・例外時リセットを検証する。"""
+
     @patch("reminder.messagebox.showwarning")
     def test_empty_message_shows_warning(self, mock_warning):
         app, root = _create_app()
@@ -227,6 +281,7 @@ class ScheduleTests(unittest.TestCase):
 
     @patch("reminder.calculate_delay_ms", return_value=60_000)
     def test_schedule_resets_ui_when_root_after_raises(self, _mock_delay):
+        # root.after() が失敗した場合に UI がアイドル状態に戻ることを確認する
         app, root = _create_app()
         app.message_text.get.return_value = "テストメッセージ"
         root.after.side_effect = RuntimeError("after failed")
@@ -240,6 +295,8 @@ class ScheduleTests(unittest.TestCase):
 
 
 class CancelScheduleTests(unittest.TestCase):
+    """cancel_schedule() のジョブキャンセルと UI リセットを検証する。"""
+
     def test_cancel_when_no_job_does_nothing(self):
         app, root = _create_app()
         app.scheduled_job_id = None
@@ -263,6 +320,8 @@ class CancelScheduleTests(unittest.TestCase):
 
 
 class ReminderAppSnoozeTests(unittest.TestCase):
+    """show_reminder() と _schedule_snooze() のスヌーズ動作を検証する。"""
+
     @patch("reminder.play_notification_sound")
     @patch("reminder.messagebox.askyesno", return_value=True)
     @patch("reminder.messagebox.showinfo")
@@ -293,6 +352,7 @@ class ReminderAppSnoozeTests(unittest.TestCase):
         mock_askyesno,
         mock_sound,
     ):
+        # snooze_minutes を省略した場合は snooze_var から取得することを確認する
         app, root = _create_app(snooze_value="7")
 
         app.show_reminder("テスト")
@@ -326,6 +386,7 @@ class ReminderAppSnoozeTests(unittest.TestCase):
     @patch("reminder.play_notification_sound")
     @patch("reminder.messagebox.showinfo")
     def test_show_reminder_skips_snooze_dialog_at_max_snooze_count(self, _mock_showinfo, _mock_sound):
+        # スヌーズ回数が上限に達した場合はスヌーズダイアログを表示しないことを確認する
         app, root = _create_app(snooze_value="5")
 
         with patch("reminder.messagebox.askyesno") as mock_askyesno:
@@ -341,6 +402,7 @@ class ReminderAppSnoozeTests(unittest.TestCase):
     def test_show_reminder_allows_snooze_below_max_snooze_count(
         self, _mock_showinfo, _mock_askyesno, _mock_sound
     ):
+        # 上限未満ではスヌーズダイアログが表示されることを確認する
         app, root = _create_app(snooze_value="5")
 
         app.show_reminder("テスト", snooze_minutes=5, snooze_count=MAX_SNOOZE_COUNT - 1)
@@ -349,6 +411,7 @@ class ReminderAppSnoozeTests(unittest.TestCase):
         root.after.assert_called_once()
 
     def test_schedule_snooze_resets_ui_when_root_after_raises(self):
+        # root.after() が失敗した場合に UI がアイドル状態に戻ることを確認する
         app, root = _create_app()
         root.after.side_effect = RuntimeError("after failed")
 
@@ -361,6 +424,8 @@ class ReminderAppSnoozeTests(unittest.TestCase):
 
 
 class BuildSectionTests(unittest.TestCase):
+    """_build_*_section() が正しいインスタンス変数を生成することを検証する。"""
+
     def setUp(self):
         root = Mock()
         with patch.object(ReminderApp, "_build_ui"), \
@@ -405,6 +470,8 @@ class BuildSectionTests(unittest.TestCase):
 
 
 class FocusNavigationTests(unittest.TestCase):
+    """_focus_next() / _focus_prev() のフォーカス移動と "break" 返却を検証する。"""
+
     def test_focus_next_moves_to_next_widget(self):
         app, root = _create_app()
         next_widget = Mock()
@@ -418,6 +485,7 @@ class FocusNavigationTests(unittest.TestCase):
         self.assertEqual(result, "break")
 
     def test_focus_next_returns_break_when_no_focused_widget(self):
+        # フォーカスされたウィジェットがない場合でも "break" を返すことを確認する
         app, root = _create_app()
         root.focus_get.return_value = None
 
@@ -447,6 +515,8 @@ class FocusNavigationTests(unittest.TestCase):
 
 
 class MainTests(unittest.TestCase):
+    """main() が Tk・ReminderApp・mainloop を正しく呼び出すことを検証する。"""
+
     @patch("reminder.ReminderApp")
     @patch("reminder.tk.Tk")
     def test_main_creates_reminder_app_and_starts_mainloop(self, mock_tk_cls, mock_app_cls):
