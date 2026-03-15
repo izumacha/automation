@@ -27,7 +27,13 @@ import types
 
 import tkinter as tk
 
-from reminder import MAX_SNOOZE_COUNT, ReminderApp, _set_window_icon, calculate_delay_ms, play_notification_sound
+from reminder import (
+    MAX_SNOOZE_COUNT,
+    ReminderApp,
+    _set_window_icon,
+    calculate_delay_ms,
+    play_notification_sound,
+)
 
 
 class CalculateDelayMsTests(unittest.TestCase):
@@ -388,10 +394,10 @@ class ReminderAppSnoozeTests(unittest.TestCase):
         root.after.assert_not_called()
         app.status_var.set.assert_called_with("通知を表示しました。次のリマインダーを設定できます。")
 
-    def test_get_snooze_minutes_normalizes_out_of_range_value(self):
+    def test_normalize_snooze_input_clamps_out_of_range_value(self):
         app, _root = _create_app(snooze_value="999")
 
-        minutes = app._get_snooze_minutes()
+        minutes = app._normalize_snooze_input()
 
         self.assertEqual(minutes, 180)
         self.assertEqual(app.snooze_var.get(), "180")
