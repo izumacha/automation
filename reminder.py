@@ -103,9 +103,9 @@ def play_notification_sound(root: tk.Tk) -> None:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
-            except Exception:
+            except Exception as e:
                 # notify-send が利用できない場合は bell にフォールバック
-                pass
+                logging.debug("notify-send の送信に失敗しました: %s", e)
     except Exception:
         # OS 固有の再生に失敗した場合は bell にフォールバック
         pass
@@ -282,9 +282,11 @@ class ReminderApp:
         self.hour_var.set(f"{self._coerce_int(self.hour_var.get(), 0, 23):02d}")
         self.minute_var.set(f"{self._coerce_int(self.minute_var.get(), 0, 59):02d}")
 
-    def _normalize_snooze_input(self) -> None:
-        """スヌーズ間隔を 1〜180 分に正規化する。"""
-        self.snooze_var.set(str(self._coerce_int(self.snooze_var.get(), 1, 180)))
+    def _normalize_snooze_input(self) -> int:
+        """スヌーズ間隔を 1〜180 分に正規化し、正規化後の値を返す。"""
+        value = self._coerce_int(self.snooze_var.get(), 1, 180)
+        self.snooze_var.set(str(value))
+        return value
 
     @staticmethod
     def _coerce_int(raw: str, min_value: int, max_value: int) -> int:
@@ -304,11 +306,6 @@ class ReminderApp:
             return min_value
         return max(min_value, min(max_value, value))
 
-    def _get_snooze_minutes(self) -> int:
-        """正規化済みのスヌーズ間隔（分）を返す。"""
-        self._normalize_snooze_input()
-        return int(self.snooze_var.get())
-
     # ------------------------------------------------------------ スケジュール
 
     def schedule(self) -> None:
@@ -327,7 +324,7 @@ class ReminderApp:
         target = datetime.time(hour=int(self.hour_var.get()), minute=int(self.minute_var.get()))
         delay_ms = calculate_delay_ms(datetime.datetime.now(), target)
 
-        snooze_minutes = self._get_snooze_minutes()
+        snooze_minutes = self._normalize_snooze_input()
 
         self._cancel_job()
         try:
@@ -339,9 +336,7 @@ class ReminderApp:
             self._reset_to_idle()
             raise
 
-        self.schedule_button.configure(state=tk.DISABLED)
-        self.cancel_button.configure(state=tk.NORMAL)
-        self.status_var.set(f"{target.hour:02d}:{target.minute:02d} に通知予定です（スヌーズ: {snooze_minutes}分）。")
+        self._set_active_state(f"{target.hour:02d}:{target.minute:02d} に通知予定です（スヌーズ: {snooze_minutes}分）。")
 
     def _cancel_job(self) -> None:
         """スケジュール済みジョブをキャンセルする（UI 状態は変更しない）。"""
@@ -360,34 +355,40 @@ class ReminderApp:
         self.cancel_button.configure(state=tk.DISABLED)
         self.status_var.set("メッセージと通知時刻を設定してください。")
 
+    def _set_active_state(self, status_msg: str) -> None:
+        """UI をスケジュール済み状態（キャンセル可能）に設定する。"""
+        self.schedule_button.configure(state=tk.DISABLED)
+        self.cancel_button.configure(state=tk.NORMAL)
+        self.status_var.set(status_msg)
+
     def cancel_schedule(self) -> None:
         """スケジュール済みの通知をユーザー操作でキャンセルする。"""
         if self.scheduled_job_id is None:
             return
-        self._cancel_job()
+        self._reset_to_idle()
         self.status_var.set("リマインダー設定を解除しました。")
-        self.schedule_button.configure(state=tk.NORMAL)
-        self.cancel_button.configure(state=tk.DISABLED)
 
     # ------------------------------------------------------------ 通知・スヌーズ
+
+    def _show_notification(self, message: str) -> None:
+        """通知音を再生し、メッセージダイアログを表示する。"""
+        play_notification_sound(self.root)
+        messagebox.showinfo("リマインダー", message)
 
     def show_reminder(self, message: str, snooze_minutes: int | None = None, snooze_count: int = 0) -> None:
         """通知ダイアログを表示し、スヌーズ有無を確認する。
 
         Args:
             message: 通知に表示するメッセージ。
-            snooze_minutes: スヌーズ間隔（分）。None の場合は snooze_var から取得する。
+            snooze_minutes: スヌーズ間隔（分）。None の場合は snooze_var から正規化して取得する。
             snooze_count: 現在のスヌーズ回数。MAX_SNOOZE_COUNT に達した場合はダイアログを省略する。
         """
         if snooze_minutes is None:
-            snooze_minutes = self._get_snooze_minutes()
+            snooze_minutes = self._normalize_snooze_input()
 
         # 通知ダイアログ表示前に UI をアイドル状態に戻す（キャンセルボタンを無効化）
-        self.scheduled_job_id = None
-        self.schedule_button.configure(state=tk.NORMAL)
-        self.cancel_button.configure(state=tk.DISABLED)
-        play_notification_sound(self.root)
-        messagebox.showinfo("リマインダー", message)
+        self._reset_to_idle()
+        self._show_notification(message)
 
         # スヌーズ上限未満の場合のみ継続スヌーズを提案する
         if snooze_count < MAX_SNOOZE_COUNT and messagebox.askyesno("スヌーズ", f"{snooze_minutes}分後に再通知しますか？"):
@@ -413,9 +414,7 @@ class ReminderApp:
             # after() が失敗した場合は UI をアイドル状態にリセットして例外を再送出する
             self._reset_to_idle()
             raise
-        self.schedule_button.configure(state=tk.DISABLED)
-        self.cancel_button.configure(state=tk.NORMAL)
-        self.status_var.set(f"スヌーズ中です。{snooze_minutes}分後に再通知します。")
+        self._set_active_state(f"スヌーズ中です。{snooze_minutes}分後に再通知します。")
 
 
 def main() -> None:
