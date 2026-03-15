@@ -446,6 +446,20 @@ class BuildSectionTests(unittest.TestCase):
             self.app = ReminderApp(root)
         self.frame = Mock()
 
+        # Tk 依存を切り離すため、各ウィジェット生成を Mock に差し替える。
+        # Python 3.12 では master が Mock の場合、ttk ウィジェット生成時に
+        # _last_child_ids の算術で TypeError になりうるため、実体化を避ける。
+        self._widget_patchers = [
+            patch("reminder.ttk.Label", side_effect=lambda *args, **kwargs: Mock()),
+            patch("reminder.tk.Text", side_effect=lambda *args, **kwargs: Mock()),
+            patch("reminder.ttk.Spinbox", side_effect=lambda *args, **kwargs: Mock()),
+            patch("reminder.ttk.Frame", side_effect=lambda *args, **kwargs: Mock()),
+            patch("reminder.ttk.Button", side_effect=lambda *args, **kwargs: Mock()),
+        ]
+        for patcher in self._widget_patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def test_build_message_section_creates_message_text(self):
         self.app._build_message_section(self.frame)
 
