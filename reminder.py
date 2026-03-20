@@ -28,6 +28,9 @@ from tkinter import messagebox, ttk
 DEFAULT_SNOOZE_MINUTES = 5
 # スヌーズを許可する最大回数。上限到達時はスヌーズダイアログを表示しない
 MAX_SNOOZE_COUNT = 10
+# スヌーズ間隔の最小・最大値（分）。UI の Spinbox 範囲と正規化ロジックで共有する
+SNOOZE_MIN_MINUTES = 1
+SNOOZE_MAX_MINUTES = 180
 
 
 def _set_window_icon(root: tk.Tk) -> None:
@@ -215,14 +218,14 @@ class ReminderApp:
     def _build_snooze_section(self, frame: ttk.Frame) -> None:
         """スヌーズ間隔（分）の Spinbox を生成する（row 3）。
 
-        フォーカスが外れた時点で 1〜180 の範囲内に正規化する。
+        フォーカスが外れた時点で SNOOZE_MIN_MINUTES〜SNOOZE_MAX_MINUTES の範囲内に正規化する。
         """
         ttk.Label(frame, text="スヌーズ間隔（分）").grid(row=3, column=0, sticky="w", pady=(0, 8))
         self.snooze_menu = ttk.Spinbox(
             frame,
             textvariable=self.snooze_var,
-            from_=1,
-            to=180,
+            from_=SNOOZE_MIN_MINUTES,
+            to=SNOOZE_MAX_MINUTES,
             wrap=True,
             width=6,
         )
@@ -283,8 +286,8 @@ class ReminderApp:
         self.minute_var.set(f"{self._coerce_int(self.minute_var.get(), 0, 59):02d}")
 
     def _normalize_snooze_input(self) -> int:
-        """スヌーズ間隔を 1〜180 分に正規化し、正規化後の値を返す。"""
-        value = self._coerce_int(self.snooze_var.get(), 1, 180)
+        """スヌーズ間隔を SNOOZE_MIN_MINUTES〜SNOOZE_MAX_MINUTES に正規化し、正規化後の値を返す。"""
+        value = self._coerce_int(self.snooze_var.get(), SNOOZE_MIN_MINUTES, SNOOZE_MAX_MINUTES)
         self.snooze_var.set(str(value))
         return value
 
@@ -337,6 +340,7 @@ class ReminderApp:
             raise
 
         self._set_active_state(f"{target.hour:02d}:{target.minute:02d} に通知予定です（スヌーズ: {snooze_minutes}分）。")
+        logging.info("リマインダーを設定: %02d:%02d（スヌーズ: %d 分）", target.hour, target.minute, snooze_minutes)
 
     def _cancel_job(self) -> None:
         """スケジュール済みジョブをキャンセルする（UI 状態は変更しない）。"""
@@ -367,6 +371,7 @@ class ReminderApp:
             return
         self._reset_to_idle()
         self.status_var.set("リマインダー設定を解除しました。")
+        logging.info("リマインダーの設定を解除しました。")
 
     # ------------------------------------------------------------ 通知・スヌーズ
 
@@ -388,6 +393,7 @@ class ReminderApp:
 
         # 通知ダイアログ表示前に UI をアイドル状態に戻す（キャンセルボタンを無効化）
         self._reset_to_idle()
+        logging.info("リマインダーを通知: スヌーズ回数 %d", snooze_count)
         self._show_notification(message)
 
         # スヌーズ上限未満の場合のみ継続スヌーズを提案する
@@ -415,6 +421,7 @@ class ReminderApp:
             self._reset_to_idle()
             raise
         self._set_active_state(f"スヌーズ中です。{snooze_minutes}分後に再通知します。")
+        logging.info("スヌーズを設定: %d 分後に再通知（回数: %d）", snooze_minutes, snooze_count)
 
 
 def main() -> None:
