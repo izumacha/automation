@@ -29,7 +29,12 @@ import tkinter as tk
 
 from reminder import (
     MAX_SNOOZE_COUNT,
+    STATUS_IDLE,
+    STATUS_NOTIFIED,
     ReminderApp,
+    _play_macos_sound,
+    _ring_bell,
+    _send_linux_notification,
     _set_window_icon,
     calculate_delay_ms,
     play_notification_sound,
@@ -140,6 +145,47 @@ class PlayNotificationSoundTests(unittest.TestCase):
         play_notification_sound(root)
 
         root.bell.assert_called_once_with()
+
+
+class PlatformHelperTests(unittest.TestCase):
+    """play_notification_sound() から抽出したプラットフォーム別ヘルパーの単体テスト。"""
+
+    @patch("reminder.threading.Thread")
+    def test_play_macos_sound_starts_daemon_thread(self, mock_thread_cls):
+        _play_macos_sound()
+
+        mock_thread_cls.assert_called_once()
+        kwargs = mock_thread_cls.call_args.kwargs
+        self.assertTrue(kwargs.get("daemon"))
+        mock_thread_cls.return_value.start.assert_called_once()
+
+    @patch("reminder.subprocess.Popen")
+    def test_send_linux_notification_invokes_notify_send(self, mock_popen):
+        _send_linux_notification()
+
+        mock_popen.assert_called_once_with(
+            ["notify-send", "--urgency=normal", "リマインダー"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    @patch("reminder.subprocess.Popen", side_effect=FileNotFoundError)
+    def test_send_linux_notification_swallows_missing_command(self, _mock_popen):
+        # notify-send が存在しなくても例外を伝播せず、呼び出し側のフォールバックに任せる
+        _send_linux_notification()
+
+    def test_ring_bell_invokes_root_bell(self):
+        root = Mock()
+
+        _ring_bell(root)
+
+        root.bell.assert_called_once_with()
+
+    def test_ring_bell_swallows_tcl_error(self):
+        root = Mock()
+        root.bell.side_effect = tk.TclError("bell unavailable")
+
+        _ring_bell(root)
 
 
 class SetWindowIconTests(unittest.TestCase):
@@ -392,7 +438,7 @@ class ReminderAppSnoozeTests(unittest.TestCase):
         app.show_reminder("休憩しましょう", snooze_minutes=15)
 
         root.after.assert_not_called()
-        app.status_var.set.assert_called_with("通知を表示しました。次のリマインダーを設定できます。")
+        app.status_var.set.assert_called_with(STATUS_NOTIFIED)
 
     def test_normalize_snooze_input_clamps_out_of_range_value(self):
         app, _root = _create_app(snooze_value="999")
@@ -413,7 +459,7 @@ class ReminderAppSnoozeTests(unittest.TestCase):
 
         mock_askyesno.assert_not_called()
         root.after.assert_not_called()
-        app.status_var.set.assert_called_with("通知を表示しました。次のリマインダーを設定できます。")
+        app.status_var.set.assert_called_with(STATUS_NOTIFIED)
 
     @patch("reminder.play_notification_sound")
     @patch("reminder.messagebox.askyesno", return_value=True)
@@ -499,7 +545,7 @@ class BuildSectionTests(unittest.TestCase):
         with patch("reminder.tk.StringVar", side_effect=lambda value="": _DummyVar(value)):
             self.app._build_status_section(self.frame)
 
-        self.assertEqual(self.app.status_var.get(), "メッセージと通知時刻を設定してください。")
+        self.assertEqual(self.app.status_var.get(), STATUS_IDLE)
 
 
 class FocusNavigationTests(unittest.TestCase):

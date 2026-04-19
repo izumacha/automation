@@ -32,6 +32,10 @@ MAX_SNOOZE_COUNT = 10
 SNOOZE_MIN_MINUTES = 1
 SNOOZE_MAX_MINUTES = 180
 
+# ステータスラベルの定型メッセージ。複数箇所で参照するため定数化する
+STATUS_IDLE = "メッセージと通知時刻を設定してください。"
+STATUS_NOTIFIED = "通知を表示しました。次のリマインダーを設定できます。"
+
 
 def _set_window_icon(root: tk.Tk) -> None:
     """SVG アイコンをウィンドウに設定する。変換ライブラリが無い場合は無視する。"""
@@ -71,53 +75,73 @@ def calculate_delay_ms(now: datetime.datetime, target: datetime.time) -> int:
     return int((target_dt - now).total_seconds() * 1000)
 
 
+def _play_macos_sound() -> None:
+    """macOS: afplay で Glass.aiff を別スレッド再生する（UI スレッドをブロックしない）。"""
+    def _play_and_wait() -> None:
+        proc = subprocess.Popen(
+            ["/usr/bin/afplay", "/System/Library/Sounds/Glass.aiff"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        proc.wait()
+
+    threading.Thread(target=_play_and_wait, daemon=True).start()
+
+
+def _play_windows_sound() -> None:
+    """Windows: winsound.MessageBeep で警告音を再生する。"""
+    import winsound
+
+    winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+
+
+def _send_linux_notification() -> None:
+    """Linux: notify-send でデスクトップ通知を送信する。失敗時はログのみ残す。"""
+    try:
+        subprocess.Popen(
+            ["notify-send", "--urgency=normal", "リマインダー"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as e:
+        # notify-send が利用できない場合はログのみ残し、呼び出し側の bell にフォールバックする
+        logging.debug("notify-send の送信に失敗しました: %s", e)
+
+
+def _ring_bell(root: tk.Tk) -> None:
+    """tkinter の bell() を安全に鳴らす（TclError は無視する）。"""
+    try:
+        root.bell()
+    except tk.TclError:
+        # 実行環境によっては bell が利用できないことがあるため無視する。
+        pass
+
+
 def play_notification_sound(root: tk.Tk) -> None:
     """通知音を再生する。
 
     プラットフォームごとに最適な方法を試み、失敗時は tkinter の bell() にフォールバックする。
     - macOS: afplay コマンドで Glass.aiff を再生（別スレッド）
     - Windows: winsound.MessageBeep で警告音を再生
-    - Linux: notify-send でデスクトップ通知を送信（失敗時は bell）
+    - Linux: notify-send でデスクトップ通知を送信し、加えて bell を鳴らす
     - その他 / 上記失敗時: root.bell()
     """
     system_name = platform.system()
     try:
         if system_name == "Darwin":
-            def _play_and_wait() -> None:
-                proc = subprocess.Popen(
-                    ["/usr/bin/afplay", "/System/Library/Sounds/Glass.aiff"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                proc.wait()
-
-            # UI スレッドをブロックしないよう別スレッドで再生する
-            threading.Thread(target=_play_and_wait, daemon=True).start()
+            _play_macos_sound()
             return
         if system_name == "Windows":
-            import winsound
-
-            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+            _play_windows_sound()
             return
         if system_name == "Linux":
-            try:
-                subprocess.Popen(
-                    ["notify-send", "--urgency=normal", "リマインダー"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except Exception as e:
-                # notify-send が利用できない場合は bell にフォールバック
-                logging.debug("notify-send の送信に失敗しました: %s", e)
+            # notify-send は音を伴わないことがあるため、後段の bell も併せて鳴らす
+            _send_linux_notification()
     except Exception:
         # OS 固有の再生に失敗した場合は bell にフォールバック
         pass
 
-    try:
-        root.bell()
-    except tk.TclError:
-        # 実行環境によっては bell が利用できないことがあるため無視する。
-        pass
+    _ring_bell(root)
 
 
 class ReminderApp:
@@ -249,7 +273,7 @@ class ReminderApp:
 
         status_var の内容が変わると自動的に再描画される。
         """
-        self.status_var = tk.StringVar(value="メッセージと通知時刻を設定してください。")
+        self.status_var = tk.StringVar(value=STATUS_IDLE)
         ttk.Label(frame, textvariable=self.status_var, foreground="#444").grid(
             row=5, column=0, columnspan=4, sticky="w"
         )
@@ -357,7 +381,7 @@ class ReminderApp:
         self._cancel_job()
         self.schedule_button.configure(state=tk.NORMAL)
         self.cancel_button.configure(state=tk.DISABLED)
-        self.status_var.set("メッセージと通知時刻を設定してください。")
+        self.status_var.set(STATUS_IDLE)
 
     def _set_active_state(self, status_msg: str) -> None:
         """UI をスケジュール済み状態（キャンセル可能）に設定する。"""
@@ -401,7 +425,7 @@ class ReminderApp:
             self._schedule_snooze(message, snooze_minutes, snooze_count + 1)
             return
 
-        self.status_var.set("通知を表示しました。次のリマインダーを設定できます。")
+        self.status_var.set(STATUS_NOTIFIED)
 
     def _schedule_snooze(self, message: str, snooze_minutes: int, snooze_count: int) -> None:
         """指定間隔後に show_reminder を再呼び出しするスヌーズジョブを登録する。
