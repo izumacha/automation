@@ -15,7 +15,7 @@ cat > "${LAUNCHER_PATH}" <<LAUNCHER
 #!/usr/bin/env bash
 set -euo pipefail
 cd "${SCRIPT_DIR}"
-exec "${PYTHON_BIN}" "${SCRIPT_DIR}/reminder.py"
+exec "${PYTHON_BIN}" -m reminder
 LAUNCHER
 chmod +x "${LAUNCHER_PATH}"
 

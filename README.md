@@ -4,17 +4,17 @@
 
 ## ツール一覧
 
-### `reminder.py` — 時刻指定リマインダー
+### リマインダーアプリ — 時刻指定リマインダー
 
 メッセージと通知時刻を設定するシンプルな GUI アプリです。
 
 - **起動方法**
 
   ```bash
-  python reminder.py
+  python -m reminder
   ```
 
-- **.svg アイコンから起動できるアプリ化（Linux）**
+- **アプリ化（Linux）**
 
   ```bash
   ./install_reminder_app.sh
@@ -27,7 +27,10 @@
   - テキストエリアにメッセージを入力
   - 時・分のドロップダウンで通知時刻を指定
   - 指定時刻になるとダイアログと通知音で知らせる
+  - スヌーズ機能（1〜180分、最大10回まで）
   - リマインダーの設定解除に対応
+  - 設定の自動保存・復元（`~/.config/reminder/settings.json`）
+  - OS ネイティブテーマによるモダンな UI
   - `assets/reminder_icon.svg` をウィンドウアイコンとして表示（`cairosvg` が必要）
 
 ---
@@ -38,15 +41,15 @@
 pip install -r requirements.txt
 ```
 
-`reminder.py` をデスクトップアプリとして使う場合は、上記インストール後に `./install_reminder_app.sh` を実行してください。
+デスクトップアプリとして使う場合は、上記インストール後に `./install_reminder_app.sh` を実行してください。
 
 | パッケージ | 用途 |
 |---|---|
-| `cairosvg` | SVG アイコンの PNG 変換（`reminder.py` のウィンドウアイコン表示） |
+| `cairosvg` | SVG アイコンの PNG 変換（ウィンドウアイコン表示） |
 
 ---
 
-## `reminder.py` をアプリとして使う手順（Linux）
+## リマインダーアプリをデスクトップアプリとして使う手順（Linux）
 
 以下の手順で、ターミナルを開かずにランチャーから使えるアプリとして利用できます。
 
@@ -75,7 +78,7 @@ pip install -r requirements.txt
 5. 設定を解除したい場合
    - アプリ上の **設定を解除** を押す
 
-> 補足: `reminder.py` は、ターミナルから `python reminder.py` で直接起動することもできます。
+> 補足: ターミナルから `python -m reminder` で直接起動することもできます。
 
 ---
 
@@ -92,9 +95,10 @@ python -m pytest tests
 - `_set_window_icon` — `cairosvg` がない環境でも例外が発生しないこと
 - `_coerce_int` — 範囲内・範囲外・非数値・境界値の正規化
 - `_normalize_time_inputs` — 上限超過・負値・ゼロパディング・非数値のリセット
-- `schedule` — 空メッセージ時の警告・正常系のジョブ登録とボタン状態
+- `schedule` — 空メッセージ時の警告・正常系のジョブ登録とボタン状態・設定保存
 - `cancel_schedule` — ジョブなし時の無操作・アクティブジョブの解除
-- `show_reminder` / `_schedule_snooze` — スヌーズ選択時の再スケジュール・スヌーズ拒否時のステータス更新
+- `show_reminder` / `_schedule_snooze` — スヌーズ選択時の再スケジュール・スヌーズ拒否時のステータス更新・上限チェック
+- `Settings` / `load_settings` / `save_settings` — 設定の永続化・読み込み・不明キーの無視
 
 ---
 
@@ -102,13 +106,20 @@ python -m pytest tests
 
 ```
 automation/
-├── reminder.py              # 時刻指定リマインダー GUI
-├── install_reminder_app.sh  # Linux 向けデスクトップエントリ生成
+├── reminder/                       # リマインダーアプリ パッケージ
+│   ├── __init__.py                 # パッケージ公開 API
+│   ├── __main__.py                 # エントリーポイント (python -m reminder)
+│   ├── app.py                      # ReminderApp GUI クラス
+│   ├── config.py                   # 設定の永続化 (JSON)
+│   ├── notifications.py            # 通知音・アイコン設定
+│   └── time_utils.py               # 遅延時間計算・定数
+├── install_reminder_app.sh         # Linux 向けデスクトップエントリ生成
 ├── requirements.txt
-├── requirements-dev.txt     # 開発・テスト用依存
+├── requirements-dev.txt            # 開発・テスト用依存
 ├── assets/
-│   └── reminder_icon.svg    # リマインダーアプリ用アイコン
+│   └── reminder_icon.svg           # リマインダーアプリ用アイコン
 └── tests/
     ├── __init__.py
+    ├── conftest.py                 # tkinter モック設定
     └── test_reminder.py
 ```

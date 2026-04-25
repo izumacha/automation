@@ -4,7 +4,7 @@
 
 ## プロジェクト概要
 
-Python 製の自動化ツールをまとめたリポジトリです。現在は GUI リマインダーアプリ (`reminder.py`) が含まれています。
+Python 製の自動化ツールをまとめたリポジトリです。現在は GUI リマインダーアプリ (`reminder/` パッケージ) が含まれています。
 
 ## 言語・スタイル
 
@@ -34,18 +34,24 @@ pip install -r requirements-dev.txt  # 開発・テスト用
 
 | ファイル | 説明 |
 |---|---|
-| `reminder.py` | 時刻指定リマインダー GUI（tkinter） |
+| `reminder/app.py` | ReminderApp GUI クラス |
+| `reminder/config.py` | 設定の永続化（JSON） |
+| `reminder/notifications.py` | 通知音・アイコン設定 |
+| `reminder/time_utils.py` | 遅延時間計算・定数 |
+| `reminder/__main__.py` | エントリーポイント（`python -m reminder`） |
 | `install_reminder_app.sh` | Linux デスクトップエントリ生成スクリプト |
 | `tests/test_reminder.py` | ユニットテスト |
 | `assets/reminder_icon.svg` | アプリアイコン |
 
 ## アーキテクチャ
 
-### reminder.py の構成
+### reminder パッケージの構成
 
-- **モジュールレベル関数**: `calculate_delay_ms()`, `play_notification_sound()`, `_set_window_icon()` — GUI クラスから独立したユーティリティ。単体テスト可能。
-- **ReminderApp クラス**: `__init__` で状態初期化 → `_build_ui()` で UI 構築。テスト時は `_build_ui` をモックして Tk インスタンスなしでテスト可能。
-- **クロスプラットフォーム対応**: macOS (`afplay`), Windows (`winsound`), Linux (`tk.bell()`) を `platform.system()` で分岐。新しい OS 固有機能を追加する場合も同じパターンに従う。
+- **`time_utils.py`**: `calculate_delay_ms()` および定数（`DEFAULT_SNOOZE_MINUTES`, `MAX_SNOOZE_COUNT` 等）。GUI から独立したユーティリティ。
+- **`notifications.py`**: `play_notification_sound()`, `_set_window_icon()` および OS 別ヘルパー。
+- **`config.py`**: `Settings` dataclass + `load_settings()` / `save_settings()` で `~/.config/reminder/settings.json` に永続化。
+- **`app.py`**: `ReminderApp` クラス。`__init__` で状態初期化 → `_build_ui()` で UI 構築。テスト時は `_build_ui` をモックして Tk インスタンスなしでテスト可能。
+- **クロスプラットフォーム対応**: macOS (`afplay`), Windows (`winsound`), Linux (`notify-send` + `tk.bell()`) を `platform.system()` で分岐。新しい OS 固有機能を追加する場合も同じパターンに従う。
 
 ## クロスプラットフォーム規約
 

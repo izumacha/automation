@@ -1,4 +1,4 @@
-"""reminder.py — 時刻指定リマインダー GUI アプリ
+"""リマインダーアプリ GUI クラス。
 
 ユーザーが指定した時刻にダイアログで通知し、スヌーズ機能を提供する。
 tkinter を使用したシングルウィンドウ構成。
@@ -14,134 +14,22 @@ tkinter を使用したシングルウィンドウ構成。
 """
 from __future__ import annotations
 
-import base64
 import datetime
 import logging
-import os
-import platform
-import subprocess
-import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-# スヌーズのデフォルト間隔（分）
-DEFAULT_SNOOZE_MINUTES = 5
-# スヌーズを許可する最大回数。上限到達時はスヌーズダイアログを表示しない
-MAX_SNOOZE_COUNT = 10
-# スヌーズ間隔の最小・最大値（分）。UI の Spinbox 範囲と正規化ロジックで共有する
-SNOOZE_MIN_MINUTES = 1
-SNOOZE_MAX_MINUTES = 180
-
-# ステータスラベルの定型メッセージ。複数箇所で参照するため定数化する
-STATUS_IDLE = "メッセージと通知時刻を設定してください。"
-STATUS_NOTIFIED = "通知を表示しました。次のリマインダーを設定できます。"
-
-
-def _set_window_icon(root: tk.Tk) -> None:
-    """SVG アイコンをウィンドウに設定する。変換ライブラリが無い場合は無視する。"""
-    try:
-        import cairosvg  # type: ignore[import]
-
-        # このファイルと同階層の assets/ ディレクトリにある SVG を使用する
-        svg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "reminder_icon.svg")
-        png_data = cairosvg.svg2png(url=svg_path, output_width=64, output_height=64)
-        icon = tk.PhotoImage(data=base64.b64encode(png_data))
-        # Tk 側で画像が解放されないように参照を保持する。
-        root._icon_image = icon  # type: ignore[attr-defined]
-        root.iconphoto(True, icon)
-    except Exception as e:
-        logging.debug("ウィンドウアイコンの設定をスキップしました: %s", e)
-
-
-def calculate_delay_ms(now: datetime.datetime, target: datetime.time) -> int:
-    """現在時刻と目標時刻から、通知までの待機時間（ミリ秒）を返す。
-
-    Args:
-        now: 現在日時。
-        target: 通知したい時刻（時・分のみ使用）。
-
-    Returns:
-        通知まで待機すべきミリ秒数。同分の場合は 0、過去時刻の場合は翌日分を返す。
-    """
-    if now.hour == target.hour and now.minute == target.minute:
-        return 0
-
-    target_dt = now.replace(hour=target.hour, minute=target.minute, second=0, microsecond=0)
-
-    # すでに過ぎている時刻が指定された場合は翌日に通知
-    if target_dt < now:
-        target_dt += datetime.timedelta(days=1)
-
-    return int((target_dt - now).total_seconds() * 1000)
-
-
-def _play_macos_sound() -> None:
-    """macOS: afplay で Glass.aiff を別スレッド再生する（UI スレッドをブロックしない）。"""
-    def _play_and_wait() -> None:
-        proc = subprocess.Popen(
-            ["/usr/bin/afplay", "/System/Library/Sounds/Glass.aiff"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        proc.wait()
-
-    threading.Thread(target=_play_and_wait, daemon=True).start()
-
-
-def _play_windows_sound() -> None:
-    """Windows: winsound.MessageBeep で警告音を再生する。"""
-    import winsound
-
-    winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
-
-
-def _send_linux_notification() -> None:
-    """Linux: notify-send でデスクトップ通知を送信する。失敗時はログのみ残す。"""
-    try:
-        subprocess.Popen(
-            ["notify-send", "--urgency=normal", "リマインダー"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception as e:
-        # notify-send が利用できない場合はログのみ残し、呼び出し側の bell にフォールバックする
-        logging.debug("notify-send の送信に失敗しました: %s", e)
-
-
-def _ring_bell(root: tk.Tk) -> None:
-    """tkinter の bell() を安全に鳴らす（TclError は無視する）。"""
-    try:
-        root.bell()
-    except tk.TclError:
-        # 実行環境によっては bell が利用できないことがあるため無視する。
-        pass
-
-
-def play_notification_sound(root: tk.Tk) -> None:
-    """通知音を再生する。
-
-    プラットフォームごとに最適な方法を試み、失敗時は tkinter の bell() にフォールバックする。
-    - macOS: afplay コマンドで Glass.aiff を再生（別スレッド）
-    - Windows: winsound.MessageBeep で警告音を再生
-    - Linux: notify-send でデスクトップ通知を送信し、加えて bell を鳴らす
-    - その他 / 上記失敗時: root.bell()
-    """
-    system_name = platform.system()
-    try:
-        if system_name == "Darwin":
-            _play_macos_sound()
-            return
-        if system_name == "Windows":
-            _play_windows_sound()
-            return
-        if system_name == "Linux":
-            # notify-send は音を伴わないことがあるため、後段の bell も併せて鳴らす
-            _send_linux_notification()
-    except Exception:
-        # OS 固有の再生に失敗した場合は bell にフォールバック
-        pass
-
-    _ring_bell(root)
+from .config import Settings, load_settings, save_settings
+from .notifications import _set_window_icon, play_notification_sound
+from .time_utils import (
+    DEFAULT_SNOOZE_MINUTES,
+    MAX_SNOOZE_COUNT,
+    SNOOZE_MAX_MINUTES,
+    SNOOZE_MIN_MINUTES,
+    STATUS_IDLE,
+    STATUS_NOTIFIED,
+    calculate_delay_ms,
+)
 
 
 class ReminderApp:
@@ -160,13 +48,17 @@ class ReminderApp:
         # root.after() が返すジョブ ID。None はスケジュールなしを意味する
         self.scheduled_job_id: str | None = None
 
-        # 入力欄の初期値を現在時刻に設定する
+        saved = load_settings()
+        # 入力欄の初期値: 保存済み設定があればそれを使用、なければ現在時刻
         now = datetime.datetime.now()
-        self.hour_var = tk.StringVar(value=f"{now.hour:02d}")
-        self.minute_var = tk.StringVar(value=f"{now.minute:02d}")
-        self.snooze_var = tk.StringVar(value=str(DEFAULT_SNOOZE_MINUTES))
+        self.hour_var = tk.StringVar(value=saved.hour if saved.hour != "00" or saved.minute != "00" else f"{now.hour:02d}")
+        self.minute_var = tk.StringVar(value=saved.minute if saved.hour != "00" or saved.minute != "00" else f"{now.minute:02d}")
+        self.snooze_var = tk.StringVar(value=saved.snooze_minutes)
 
         self._build_ui()
+
+        if saved.message:
+            self.message_text.insert("1.0", saved.message)
 
     # ------------------------------------------------------------------ UI 構築
 
@@ -181,7 +73,20 @@ class ReminderApp:
         self.root.resizable(False, False)
         self.root.columnconfigure(0, weight=1)
 
-        frame = ttk.Frame(self.root, padding=16)
+        # OS ネイティブに近いテーマを選択
+        style = ttk.Style()
+        available = style.theme_names()
+        for theme in ("aqua", "clam", "vista"):
+            if theme in available:
+                style.theme_use(theme)
+                break
+
+        style.configure("TLabel", font=("system", 11))
+        style.configure("TButton", font=("system", 11), padding=6)
+        style.configure("TSpinbox", font=("system", 11))
+        style.configure("Status.TLabel", font=("system", 10), foreground="#666")
+
+        frame = ttk.Frame(self.root, padding=20)
         frame.grid(sticky="nsew")
         frame.columnconfigure(1, weight=1)
 
@@ -200,8 +105,11 @@ class ReminderApp:
 
         Tab / Shift-Tab でフォームの前後ウィジェットにフォーカスを移動できる。
         """
-        ttk.Label(frame, text="メッセージ").grid(row=0, column=0, sticky="w", pady=(0, 8))
-        self.message_text = tk.Text(frame, width=36, height=5, wrap="word")
+        ttk.Label(frame, text="メッセージ").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        self.message_text = tk.Text(frame, width=38, height=5, wrap="word",
+                                    font=("system", 11), relief="flat",
+                                    highlightthickness=1, highlightcolor="#0078d4",
+                                    highlightbackground="#ccc", padx=6, pady=6)
         self.message_text.grid(row=1, column=0, columnspan=4, sticky="ew")
         # tk.Text は既定で Tab がフォーカス移動せずタブ文字を挿入するため上書きする
         self.message_text.bind("<Tab>", self._focus_next)
@@ -212,7 +120,7 @@ class ReminderApp:
 
         フォーカスが外れた時点で入力値を正規化し、2 桁ゼロ埋め表示に統一する。
         """
-        ttk.Label(frame, text="通知時刻").grid(row=2, column=0, sticky="w", pady=(12, 8))
+        ttk.Label(frame, text="通知時刻").grid(row=2, column=0, sticky="w", pady=(14, 6))
         self.hour_menu = ttk.Spinbox(
             frame,
             textvariable=self.hour_var,
@@ -222,10 +130,11 @@ class ReminderApp:
             width=4,
             format="%02.0f",
         )
-        self.hour_menu.grid(row=2, column=1, sticky="w", pady=(12, 8))
+        self.hour_menu.grid(row=2, column=1, sticky="w", pady=(14, 6))
         self.hour_menu.bind("<FocusOut>", lambda _event: self._normalize_time_inputs())
 
-        ttk.Label(frame, text=":").grid(row=2, column=2, sticky="w", pady=(12, 8))
+        ttk.Label(frame, text=":", font=("system", 14, "bold")).grid(
+            row=2, column=2, sticky="w", pady=(14, 6), padx=(2, 2))
 
         self.minute_menu = ttk.Spinbox(
             frame,
@@ -236,7 +145,7 @@ class ReminderApp:
             width=4,
             format="%02.0f",
         )
-        self.minute_menu.grid(row=2, column=3, sticky="w", pady=(12, 8))
+        self.minute_menu.grid(row=2, column=3, sticky="w", pady=(14, 6))
         self.minute_menu.bind("<FocusOut>", lambda _event: self._normalize_time_inputs())
 
     def _build_snooze_section(self, frame: ttk.Frame) -> None:
@@ -244,7 +153,7 @@ class ReminderApp:
 
         フォーカスが外れた時点で SNOOZE_MIN_MINUTES〜SNOOZE_MAX_MINUTES の範囲内に正規化する。
         """
-        ttk.Label(frame, text="スヌーズ間隔（分）").grid(row=3, column=0, sticky="w", pady=(0, 8))
+        ttk.Label(frame, text="スヌーズ間隔（分）").grid(row=3, column=0, sticky="w", pady=(4, 6))
         self.snooze_menu = ttk.Spinbox(
             frame,
             textvariable=self.snooze_var,
@@ -253,7 +162,7 @@ class ReminderApp:
             wrap=True,
             width=6,
         )
-        self.snooze_menu.grid(row=3, column=1, sticky="w", pady=(0, 8))
+        self.snooze_menu.grid(row=3, column=1, sticky="w", pady=(4, 6))
         self.snooze_menu.bind("<FocusOut>", lambda _event: self._normalize_snooze_input())
 
     def _build_buttons_section(self, frame: ttk.Frame) -> None:
@@ -262,7 +171,7 @@ class ReminderApp:
         初期状態では cancel_button を無効化し、スケジュール後に有効化する。
         """
         buttons = ttk.Frame(frame)
-        buttons.grid(row=4, column=0, columnspan=4, sticky="w", pady=(8, 8))
+        buttons.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(12, 8))
         self.schedule_button = ttk.Button(buttons, text="リマインダーを設定", command=self.schedule)
         self.schedule_button.pack(side=tk.LEFT)
         self.cancel_button = ttk.Button(buttons, text="設定を解除", command=self.cancel_schedule, state=tk.DISABLED)
@@ -274,8 +183,8 @@ class ReminderApp:
         status_var の内容が変わると自動的に再描画される。
         """
         self.status_var = tk.StringVar(value=STATUS_IDLE)
-        ttk.Label(frame, textvariable=self.status_var, foreground="#444").grid(
-            row=5, column=0, columnspan=4, sticky="w"
+        ttk.Label(frame, textvariable=self.status_var, style="Status.TLabel").grid(
+            row=5, column=0, columnspan=4, sticky="w", pady=(4, 0)
         )
 
     # ------------------------------------------------------------ フォーカス制御
@@ -366,6 +275,13 @@ class ReminderApp:
         self._set_active_state(f"{target.hour:02d}:{target.minute:02d} に通知予定です（スヌーズ: {snooze_minutes}分）。")
         logging.info("リマインダーを設定: %02d:%02d（スヌーズ: %d 分）", target.hour, target.minute, snooze_minutes)
 
+        save_settings(Settings(
+            message=message,
+            hour=self.hour_var.get(),
+            minute=self.minute_var.get(),
+            snooze_minutes=self.snooze_var.get(),
+        ))
+
     def _cancel_job(self) -> None:
         """スケジュール済みジョブをキャンセルする（UI 状態は変更しない）。"""
         if self.scheduled_job_id is not None:
@@ -446,15 +362,3 @@ class ReminderApp:
             raise
         self._set_active_state(f"スヌーズ中です。{snooze_minutes}分後に再通知します。")
         logging.info("スヌーズを設定: %d 分後に再通知（回数: %d）", snooze_minutes, snooze_count)
-
-
-def main() -> None:
-    """アプリケーションのエントリーポイント。Tk ウィンドウを生成してイベントループを起動する。"""
-    logging.basicConfig(level=logging.INFO)
-    root = tk.Tk()
-    ReminderApp(root)
-    root.mainloop()
-
-
-if __name__ == "__main__":
-    main()
