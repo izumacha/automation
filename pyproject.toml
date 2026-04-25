@@ -1,0 +1,17 @@
+[project]
+name = "reminder"
+version = "0.1.0"
+description = "時刻指定リマインダー GUI アプリ（tkinter）"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "cairosvg>=2.7.0",
+]
+
+[project.scripts]
+reminder = "reminder:main"
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+

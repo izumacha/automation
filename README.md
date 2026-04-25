@@ -14,7 +14,14 @@
   python -m reminder
   ```
 
-- **アプリ化（Linux）**
+- **pipx でインストールして起動（推奨）**
+
+  ```bash
+  pipx install git+https://github.com/izumacha/automation.git
+  reminder
+  ```
+
+- **.svg アイコンから起動できるアプリ化（Linux）**
 
   ```bash
   ./install_reminder_app.sh
