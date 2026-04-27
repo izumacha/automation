@@ -110,6 +110,24 @@ cp ~/.config/reminder/settings.json ~/.config/reminder/settings.json.bak
 
 ---
 
+## 配布（ワンクリック起動）案
+
+GUI アプリとして「配布してダブルクリックで起動したい」場合は、`pyinstaller` を使う案があります。
+
+- メリット: Python 未導入の環境でも配布しやすい
+- デメリット: バイナリが大きくなる、OSごとにビルドが必要
+
+例（macOS / Linux のイメージ）:
+
+```bash
+pip install pyinstaller
+pyinstaller -F -w -n reminder reminder/__main__.py
+```
+
+> 将来的に GitHub Actions で各OS向けにビルドして Release に添付する運用も可能です。
+
+---
+
 ## テスト
 
 ```bash
