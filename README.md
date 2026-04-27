@@ -89,6 +89,27 @@ pip install -r requirements.txt
 
 ---
 
+## 設定ファイル（自動保存）
+
+設定は自動的に保存/復元されます。
+
+- **Linux**: `~/.config/reminder/settings.json`
+- **macOS / Windows**: アプリ内で利用するユーザーディレクトリ配下に保存します（詳細は `reminder/config.py` を参照）
+
+### バックアップ
+
+設定を退避したい場合は `settings.json` をコピーしてください。
+
+```bash
+cp ~/.config/reminder/settings.json ~/.config/reminder/settings.json.bak
+```
+
+### 互換性
+
+将来キーが増えても、未知のキーは無視されるため、古い設定ファイルでも起動できる想定です。
+
+---
+
 ## テスト
 
 ```bash
