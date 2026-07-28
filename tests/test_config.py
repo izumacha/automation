@@ -308,6 +308,35 @@ class CorruptFilePreservationTests(unittest.TestCase):
             self.assertTrue(os.path.exists(tasks_path + ".corrupt"))  # 形式不正のファイルも退避されていること
 
 
+    def test_huge_integer_tasks_json_falls_back_instead_of_crashing(self):
+        # Python 3.11+ の json.load は桁数上限（int_max_str_digits）を超える巨大整数で
+        # JSONDecodeError ではなく素の ValueError を投げる。旧実装はこれを捕捉できず
+        # 起動そのものがクラッシュしていた（fail-safe 違反）。他の壊れたファイルと
+        # 同様に、警告ログ＋ .corrupt への退避＋空リストへのフォールバックになること
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tasks_path = os.path.join(tmpdir, "tasks.json")  # テスト用のタスクファイルパスを組み立てる
+            huge = "[" + "9" * 5000 + "]"  # 桁数上限（既定 4300 桁）を超える巨大整数を含む JSON を用意する
+            with open(tasks_path, "w", encoding="utf-8") as f:  # 壊れたファイルを書き込み用に開く
+                f.write(huge)  # 巨大整数の JSON をそのまま書き込む
+            with patch("reminder.config._TASKS_PATH", tasks_path), \
+                 self.assertLogs(level="WARNING"):  # 警告ログが出ることも確認する
+                self.assertEqual(load_tasks(), [])  # クラッシュせず空リストへフォールバックする
+            self.assertTrue(os.path.exists(tasks_path + ".corrupt"))  # 巨大整数のファイルも退避されていること
+
+    def test_huge_integer_settings_json_falls_back_instead_of_crashing(self):
+        # settings.json 側も同様に、桁数上限超過の巨大整数で起動をクラッシュさせず
+        # 既定値へフォールバックし、元ファイルを .corrupt へ退避すること
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "settings.json")  # テスト用の設定ファイルパスを組み立てる
+            huge = '{"wake": ' + "9" * 5000 + "}"  # 桁数上限を超える巨大整数を値に持つ JSON を用意する
+            with open(path, "w", encoding="utf-8") as f:  # 壊れたファイルを書き込み用に開く
+                f.write(huge)  # 巨大整数の JSON をそのまま書き込む
+            with patch("reminder.config._SETTINGS_PATH", path), \
+                 self.assertLogs(level="WARNING"):  # 警告ログが出ることも確認する
+                self.assertEqual(load_prefs().wake, "07:00")  # クラッシュせず既定値へフォールバックする
+            self.assertTrue(os.path.exists(path + ".corrupt"))  # 巨大整数のファイルも退避されていること
+
+
 class TransientIoErrorTests(unittest.TestCase):
     """一時的な I/O エラー（OSError）を「壊れたファイル」と誤認して隔離・上書きしないことのテスト。"""
 
