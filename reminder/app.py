@@ -1035,7 +1035,7 @@ class PlannerApp:
         now = now or self._get_now()  # 引数で現在時刻が渡されなければ _get_now() から取得する（時刻源を一元化する）
         done = completed_count_on(self.prefs.completions, today, wake, sleep)  # 今日の完了タスク数を集計する
         streak = current_streak(self.prefs.completions, today, wake, sleep)  # 現在の連続達成日数を計算する
-        free = free_minutes_today(self.tasks, today, wake, sleep, now)  # 今日の合計空き時間（分）を計算する（基準時刻も _get_now() に揃える）
+        free = free_minutes_today(self.tasks, today, wake, sleep, now)  # 今日の「これから使える」空き時間（分）を計算する（基準時刻も _get_now() に揃える）
         self.stats_var.set(
             f"今日の完了 {done}件 ・ 連続 {streak}日 ・ 空き {format_duration(free)}")  # 統計文字列を組み立ててヘッダラベルに設定する
 
