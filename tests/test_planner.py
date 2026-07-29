@@ -256,6 +256,44 @@ class AddToTimelineTests(AppTestCase):
         # メッセージにも日付(06/02)が含まれ、今日ではないことが分かるようになっている
         self.assertIn("06/02 09:00", app.status_var.get())
 
+    def test_status_message_night_range_next_planner_day_shows_date(self):
+        # 夜型レンジ(起床 09:00 / 就寝 01:00)の深夜 00:30 は「前日のプランナー日」。
+        # ここで同じ暦日の午前 10:00 のタスクを追加すると、暦日は同じでも表示中の
+        # プランナー日には載らない(次のプランナー日に属する)。旧実装は暦日比較の
+        # ため時刻のみ表示し、「今日追加されたのに画面のどこにも無い」と誤解させて
+        # いた(回帰防止: 判定をヘッダ・デイビューと同じ planner_day 基準に揃える)
+        app, _ = self._app(prefs=Prefs(wake="09:00", sleep="01:00"))  # 夜型レンジの設定でアプリを生成する
+        fixed = datetime.datetime(2026, 7, 15, 0, 30)  # 深夜 00:30(プランナー日は前日 7/14)に固定する
+        app._get_now = lambda: fixed  # 実時計に依存しないよう現在時刻を固定する
+        app._auto_start_default = (0, 0)  # 既定値の自動更新が入力値を上書きしないようリセットする
+        app.title_var.set("朝会の準備")  # タスク名を入力する
+        app.hour_var.set("10")  # 開始時刻の「時」を入力する
+        app.minute_var.set("00")  # 開始時刻の「分」を入力する
+        app.add_to_timeline()  # タイムラインへ追加する
+        # due は暦日としては「今日」と同じ 7/15 の 10:00(未来なので繰り上げなし)
+        self.assertEqual(app.tasks[0].due_dt, datetime.datetime(2026, 7, 15, 10, 0))
+        # プランナー日では表示中の「今日(7/14)」ではないため、日付付きで表示される
+        self.assertIn("07/15 10:00", app.status_var.get())
+
+    def test_status_message_night_range_same_planner_day_omits_date(self):
+        # 夜型レンジの 23:30 に深夜 00:15 のタスクを追加すると、繰り上げで暦日は
+        # 翌日(7/16)になるが、planner_day では同じ「今日(7/15)」でデイビューにも
+        # 今日として描かれる。旧実装は暦日比較のため日付付きで表示し、画面には
+        # 今日として見えているのに「別の日へ登録された」と誤解させていた(回帰防止)
+        app, _ = self._app(prefs=Prefs(wake="09:00", sleep="01:00"))  # 夜型レンジの設定でアプリを生成する
+        fixed = datetime.datetime(2026, 7, 15, 23, 30)  # 夜 23:30(プランナー日は 7/15)に固定する
+        app._get_now = lambda: fixed  # 実時計に依存しないよう現在時刻を固定する
+        app._auto_start_default = (0, 0)  # 既定値の自動更新が入力値を上書きしないようリセットする
+        app.title_var.set("夜のストレッチ")  # タスク名を入力する
+        app.hour_var.set("00")  # 開始時刻の「時」を入力する
+        app.minute_var.set("15")  # 開始時刻の「分」を入力する
+        app.add_to_timeline()  # タイムラインへ追加する
+        # due は繰り上げにより暦日としては翌日 7/16 の 00:15(就寝境界 01:00 より前)
+        self.assertEqual(app.tasks[0].due_dt, datetime.datetime(2026, 7, 16, 0, 15))
+        # planner_day では表示中の「今日」なので日付は出さず時刻のみ表示される
+        self.assertNotIn("07/16", app.status_var.get())
+        self.assertIn("00:15", app.status_var.get())
+
 
 class AddToBacklogTests(AppTestCase):
     def test_adds_backlog_task(self):

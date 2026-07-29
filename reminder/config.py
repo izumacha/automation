@@ -311,7 +311,7 @@ def load_tasks() -> list[Task]:
         # Treeview の iid には task.id を使うため「空でない一意な文字列」でなければならない。
         # 手編集や不正なマージで id が空文字・非文字列（例: 123）・重複になっていると、
         # 空文字は Treeview のルート item と衝突し、非文字列は選択時に文字列化されて
-        # _selected_task() がマッチできない。これらの場合は再採番して起動不能を防ぐ。
+        # PlannerApp._selected()（_find() 経由の照合）がマッチできない。これらの場合は再採番して起動不能を防ぐ。
         if not isinstance(task.id, str) or not task.id or task.id in seen_ids:  # IDが不正（非文字列・空・重複）な場合
             task.id = uuid.uuid4().hex  # ランダムな一意IDを新たに割り当てる
         seen_ids.add(task.id)  # このIDを「使用済み」として記録する
