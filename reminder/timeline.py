@@ -225,17 +225,23 @@ def free_minutes_today(
     sleep_min: int = DEFAULT_SLEEP_MIN,
     now: datetime.datetime | None = None,
 ) -> int:
-    """指定日の空き時間（分）の合計を返す。
+    """指定日の「これから使える」空き時間（分）の合計を返す。
 
     窓拡張で生じた起床前・就寝後の時間は「空き」に数えない（設定された
     起床〜就寝の窓 [day_start, day_end] に重なる部分のみを対象とする）。
+    さらに既に経過した時間も除外する（各空き行を [max(now, 起床), 就寝] に
+    クリップする）。経過分を含めると、就寝間際でもヘッダの「空き」が朝と
+    同じ値のまま表示され、提案エンジン（max_free_slot）と食い違うため。
+    過去日を渡した場合は残り時間が無いので 0 になる。
     """
+    now = now or datetime.datetime.now()  # now が None の場合は現在時刻を使う
     day_start, day_end = day_bounds(date, wake_min, sleep_min)  # 起床・就寝日時を取得する
+    lower = max(day_start, now)  # 起床日時と現在時刻の遅い方を下限として使う（過去を除外。max_free_slot と同じ規約）
     total_seconds = 0.0  # 空き時間の合計「秒数」を 0 で初期化する（分に丸める前に秒で貯める）
     for row in build_day_timeline(tasks, date, wake_min, sleep_min, now):  # 各タイムライン行についてループする
         if row.kind != ROW_FREE:  # 空き時間行でない場合（タスク行）
             continue  # スキップして次の行へ進む
-        s, e = max(row.start, day_start), min(row.end, day_end)  # 空き時間を起床〜就寝の窓にクリップする
+        s, e = max(row.start, lower), min(row.end, day_end)  # 空き時間を「現在以降かつ就寝前」にクリップする
         if e > s:  # クリップ後にまだ正の長さがある場合
             # 行ごとに分へ丸めず「秒」を貯める。行単位で切り捨てると各行の端数が
             # 独立に捨てられ、秒付き時刻（繰り返しタスクが生成する due）で合計が

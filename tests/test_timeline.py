@@ -116,28 +116,43 @@ class BuildTimelineTests(unittest.TestCase):
 
     def test_free_minutes_today(self):
         tasks = [_t("朝会", "2026-06-06T09:00:00", 60)]
-        # 16時間(960分) - 60分 = 900分
-        self.assertEqual(free_minutes_today(tasks, self.today, 7 * 60, 23 * 60, self.now), 900)
+        # now=10:00 なので残り窓は 10:00〜23:00 = 780分。朝会（09:00〜10:00）は
+        # 既に終わっているため差し引きはなく、780分がそのまま「これから使える」空き
+        self.assertEqual(free_minutes_today(tasks, self.today, 7 * 60, 23 * 60, self.now), 780)
+
+    def test_elapsed_time_excluded_from_free_total(self):
+        # タスクが無い日でも、既に経過した時間は「空き」に数えない
+        # （max_free_slot と同じ規約。就寝間際に朝と同じ空きが表示される問題の回帰テスト）
+        late = datetime.datetime(2026, 6, 6, 22, 0)
+        # 残り窓は 22:00〜23:00 の 60 分だけ
+        self.assertEqual(free_minutes_today([], self.today, 7 * 60, 23 * 60, late), 60)
+        # 就寝後（23:30）はもう使える時間が無いので 0
+        after = datetime.datetime(2026, 6, 6, 23, 30)
+        self.assertEqual(free_minutes_today([], self.today, 7 * 60, 23 * 60, after), 0)
 
     def test_free_minutes_exact_with_second_level_task_times(self):
         # 秒付きの due（繰り返しタスクが完了時刻から生成する）でも合計空きが正確であること。
+        # 基準時刻を起床（07:00）に固定し、経過時間クリップの影響なしで窓全体を測る。
         # 09:00:30-09:30:30 と 10:00:30-10:30:30 の 2 タスクで占有はちょうど 60 分。
         # 窓 07:00-23:00 = 960 分なので空きは 900 分ちょうど。
         # 行ごとに分へ切り捨てると端数が二重に失われて 899 分になってしまうため、
         # 秒で合計してから最後に丸める実装であることをここで担保する。
+        wake_time = datetime.datetime(2026, 6, 6, 7, 0)
         tasks = [
             _t("A", "2026-06-06T09:00:30", 30),
             _t("B", "2026-06-06T10:00:30", 30),
         ]
-        self.assertEqual(free_minutes_today(tasks, self.today, 7 * 60, 23 * 60, self.now), 900)
+        self.assertEqual(free_minutes_today(tasks, self.today, 7 * 60, 23 * 60, wake_time), 900)
 
     def test_free_minutes_counts_sub_minute_gaps(self):
         # 1 分未満の隙間（秒付き due が作る 60 秒未満の空き）も合計に含まれること。
         # タスク 00:00:20〜00:30:20（30 分）を窓 00:00〜01:00 に置くと、
         # 空きは 20 秒 + 29 分 40 秒 = ちょうど 30 分。隙間の行を省略する実装だと
         # 先頭 20 秒が失われて 29 分に過少計上されるため、ここで担保する。
+        # 基準時刻は窓の先頭（00:00）に固定し、経過時間クリップの影響を受けないようにする。
+        midnight = datetime.datetime(2026, 6, 6, 0, 0)
         tasks = [_t("秒付き", "2026-06-06T00:00:20", 30)]
-        self.assertEqual(free_minutes_today(tasks, self.today, 0, 60, self.now), 30)
+        self.assertEqual(free_minutes_today(tasks, self.today, 0, 60, midnight), 30)
 
     def test_sub_minute_gap_emits_zero_minute_free_row(self):
         # 60 秒未満の隙間でも ROW_FREE 行が出力されること（minutes は切り捨てで 0）。
@@ -160,8 +175,10 @@ class BuildTimelineTests(unittest.TestCase):
     def test_free_minutes_excludes_off_hours(self):
         # 就寝 23:00 の後（23:15）にタスクがあっても、窓外（23:00〜23:15）は
         # 空きに数えない。空きは 07:00〜23:00 = 960 分のみ。
+        # 基準時刻は起床（07:00）に固定し、経過時間クリップの影響を受けないようにする。
+        wake_time = datetime.datetime(2026, 6, 6, 7, 0)
         tasks = [_t("夜の作業", "2026-06-06T23:15:00", 30)]
-        self.assertEqual(free_minutes_today(tasks, self.today, 7 * 60, 23 * 60, self.now), 960)
+        self.assertEqual(free_minutes_today(tasks, self.today, 7 * 60, 23 * 60, wake_time), 960)
 
     def test_overnight_window_includes_next_day_task(self):
         # 起床 09:00 / 就寝 01:00（翌日）。翌 00:30 のタスクも窓内として含める
