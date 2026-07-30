@@ -153,6 +153,17 @@ CAL_TEXT_MIN_WIDTH = 10    # テキストの折り返し幅の最低値（ピク
 CAL_TITLE_PAD_TOP = 8      # タイトル文字とカード上端の間の余白（ピクセル単位）
 CAL_TIME_PAD_BOTTOM = 7    # 時刻文字とカード下端の間の余白（ピクセル単位）
 
+# カレンダー描画の寸法トークン（続き）。以前は app.py に生の数値として
+# 直書きされていたため、CLAUDE.md §6「見た目の値をコードに直書きしない」に
+# 従いここへ集約する。
+CAL_INITIAL_HOURS = 12     # カレンダー Canvas の初期表示時間数（時間単位。初期高さ = CAL_INITIAL_HOURS × HOUR_HEIGHT）
+CAL_MIN_DRAW_WIDTH = 80    # 時刻ラベル列（CAL_GUTTER）の右に確保する描画エリアの最小幅（ピクセル単位）
+CAL_SELECT_OUTLINE_W = 3   # 選択中タスクカードの枠線の太さ（ピクセル単位）
+CAL_OUTLINE_W = 1          # 非選択タスクカードの枠線の太さ（ピクセル単位）
+CAL_CHECK_OUTLINE_W = 2    # 未完了チェックボックス円の枠線の太さ（ピクセル単位）
+NOW_LINE_W = 2             # 現在時刻ライン（NOW_LINE 色）の線の太さ（ピクセル単位）
+NOW_DOT_R = 4              # 現在時刻ラインの左端に描くドットの半径（ピクセル単位）
+
 
 def category_index(key: str) -> int:
     """タスクを表す文字列（id 等）から安定したカラー番号を返す。

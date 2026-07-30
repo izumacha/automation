@@ -372,7 +372,7 @@ class PlannerApp:
         body.rowconfigure(0, weight=1)  # Canvas が縦いっぱいに広がるよう行 0 を伸縮させる
         # timeline_tree という名前は後方互換のため踏襲（実体はカレンダー Canvas）。
         self.timeline_tree = tk.Canvas(body, bg=theme.CARD, highlightthickness=0,
-                                       height=12 * theme.HOUR_HEIGHT)  # カレンダーを描く Canvas を作る（初期高さは 12 時間分）
+                                       height=theme.CAL_INITIAL_HOURS * theme.HOUR_HEIGHT)  # カレンダーを描く Canvas を作る（初期高さはテーマの初期表示時間数ぶん）
         self.timeline_tree.grid(row=0, column=0, sticky="nsew")  # Canvas を四辺いっぱいに配置する
         sb = ttk.Scrollbar(body, orient="vertical", command=self.timeline_tree.yview)  # Canvas の縦スクロールバーを作る
         self.timeline_tree.configure(yscrollcommand=sb.set)  # スクロールバーと Canvas を連動させる
@@ -773,7 +773,7 @@ class PlannerApp:
         def y_of(dt: datetime.datetime) -> float:
             return theme.CAL_PAD_TOP + (dt - window_start).total_seconds() / 60.0 * scale  # 日時を Canvas の y 座標（ピクセル）に変換する
 
-        width = max(self._tl_width, theme.CAL_GUTTER + 80)  # 描画幅を Canvas の現在幅と最小幅の大きい方にする
+        width = max(self._tl_width, theme.CAL_GUTTER + theme.CAL_MIN_DRAW_WIDTH)  # 描画幅を Canvas の現在幅と最小幅（時刻ラベル列＋最小描画エリア）の大きい方にする
         self._draw_time_grid(cv, window_start, window_end, width, y_of)  # 正時の罫線と時刻ラベルを描く
 
         # 描画時に最低高さ（theme.CAL_MIN_BLOCK_HEIGHT px）へクランプされる極端に
@@ -868,7 +868,7 @@ class PlannerApp:
         fill, accent, text_color = self._block_colors(task, row.status)  # タスクの状態（完了・進行中・過去など）に応じた配色を取得する
         is_selected = task.id == self._tl_selected  # このタスクが現在選択中かどうかを判定する
         outline = theme.BRAND_DARK if is_selected else theme.BORDER  # 選択中なら強調色、それ以外は通常の枠色を使う
-        ow = 3 if is_selected else 1  # 選択中は枠線を太く（3px）、それ以外は細く（1px）する
+        ow = theme.CAL_SELECT_OUTLINE_W if is_selected else theme.CAL_OUTLINE_W  # 選択中は枠線を太く、それ以外は細くする（太さはテーマの寸法トークン）
         # カード本体（角丸）とカテゴリ色の左ストライプ。
         self._rounded_rect(cv, x0, y0, x1, y1, r=theme.CAL_RADIUS, fill=fill,
                            outline=outline, width=ow, tags=("task", task.id))  # タスクカード本体（角丸長方形）を描く
@@ -910,7 +910,7 @@ class PlannerApp:
                            font=theme.FONT_SMALL, tags=("task", task.id))  # 円の中にチェックマーク（✓）を描く
         else:  # 未完了なら
             cv.create_oval(cb_cx - r, cb_cy - r, cb_cx + r, cb_cy + r,
-                           outline=accent, width=2, tags=("task", task.id))  # 枠線だけの円（空のチェックボックス）を描く
+                           outline=accent, width=theme.CAL_CHECK_OUTLINE_W, tags=("task", task.id))  # 枠線だけの円（空のチェックボックス）を描く（枠線の太さはテーマのトークン）
 
         self._tl_blocks.append((x0, y0, x1, y1, cb_box, task.id, done))  # クリック判定情報をリストに追加する
 
@@ -964,9 +964,10 @@ class PlannerApp:
         if now < window_start or now > window_end:  # 現在時刻が表示ウィンドウ外なら
             return  # now ラインを描かずに処理を終える
         y = y_of(now)  # 現在時刻の y 座標を計算する
-        cv.create_line(theme.CAL_GUTTER, y, width, y, fill=theme.NOW_LINE, width=2)  # 現在時刻を示す水平線を描く
-        cv.create_oval(theme.CAL_GUTTER - 4, y - 4, theme.CAL_GUTTER + 4, y + 4,
-                       fill=theme.NOW_LINE, outline=theme.NOW_LINE)  # 水平線の左端に円（ドット）を描く
+        cv.create_line(theme.CAL_GUTTER, y, width, y, fill=theme.NOW_LINE, width=theme.NOW_LINE_W)  # 現在時刻を示す水平線を描く（線の太さはテーマのトークン）
+        cv.create_oval(theme.CAL_GUTTER - theme.NOW_DOT_R, y - theme.NOW_DOT_R,
+                       theme.CAL_GUTTER + theme.NOW_DOT_R, y + theme.NOW_DOT_R,
+                       fill=theme.NOW_LINE, outline=theme.NOW_LINE)  # 水平線の左端に円（ドット）を描く（半径はテーマのトークン）
 
     def _on_timeline_resize(self, event) -> None:
         """Canvas の幅変更に合わせてカレンダーだけを再描画する。
