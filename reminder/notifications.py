@@ -118,9 +118,9 @@ def _ring_bell(root: tk.Tk) -> None:
     """tkinter の bell() を安全に鳴らす（TclError は無視する）。"""
     try:
         root.bell()  # tkinter のビープ音（システムベル）を鳴らす
-    except tk.TclError:
+    except tk.TclError as e:
         # 実行環境によっては bell が利用できないことがあるため無視する。
-        pass  # TclError が発生しても何もせず静かに無視する
+        logging.debug("bell の再生に失敗しました: %s", e)  # 想定内の良性エラーなのでデバッグログにだけ原因を残す（§6: エラーを握り潰さない）
 
 
 def play_notification_sound(root: tk.Tk, body: str = "") -> None:
