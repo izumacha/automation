@@ -4,6 +4,7 @@ GUI 依存を避けるため _build_ui・_refresh・_schedule_all をパッチ�
 ロジック層（タスク追加・完了・削除・あとで⇄予定の移動・通知スケジュール）を検証する。
 """
 import datetime
+import logging
 import unittest
 from unittest.mock import Mock, patch
 
@@ -518,6 +519,42 @@ class PeriodicRefreshTests(AppTestCase):
         root.after.reset_mock()
         app._tick()  # 例外を外へ送出せずに完了する
         root.after.assert_called_once_with(REFRESH_INTERVAL_MS, app._tick)
+
+    def test_tick_logs_warning_on_first_refresh_failure(self):
+        # 初回の _refresh() 失敗は、INFO レベル起動（cli.py）でも見える warning で
+        # 記録されることを確認する（debug では失敗が完全に不可視になるため）
+        app, root = self._app()  # GUI 無しでアプリを生成する
+        app._refresh = Mock(side_effect=RuntimeError("boom"))  # _refresh() が必ず失敗するようにモックする
+        root.after.reset_mock()  # __init__ 中の after 呼び出し履歴をクリアする
+        with self.assertLogs(level=logging.WARNING) as cm:  # WARNING 以上のログが出ることを捕捉する
+            app._tick()  # 失敗するティックを実行する（例外は外へ漏れない）
+        self.assertTrue(any("定期更新に失敗しました" in msg for msg in cm.output))  # 定期更新の失敗が warning で記録されている
+        self.assertTrue(app._tick_error_logged)  # 初回失敗を記録済みのフラグが立っている
+
+    def test_tick_logs_debug_on_repeated_refresh_failure(self):
+        # 2 回目以降の連続失敗は debug に落ち、warning でログが溢れないことを確認する
+        app, root = self._app()  # GUI 無しでアプリを生成する
+        app._refresh = Mock(side_effect=RuntimeError("boom"))  # _refresh() が必ず失敗するようにモックする
+        app._tick_error_logged = True  # 既に初回失敗を warning で記録済みの状態を再現する
+        root.after.reset_mock()  # __init__ 中の after 呼び出し履歴をクリアする
+        with self.assertLogs(level=logging.DEBUG) as cm:  # DEBUG 以上のログを全部捕捉する
+            app._tick()  # 連続失敗のティックを実行する
+        failure_records = [r for r in cm.records if "定期更新に失敗しました" in r.getMessage()]  # 定期更新の失敗ログだけを抜き出す
+        self.assertTrue(failure_records)  # 連続失敗でも debug では原因が記録されている
+        self.assertTrue(all(r.levelno == logging.DEBUG for r in failure_records))  # 連続失敗は warning ではなく debug で記録されている
+
+    def test_tick_error_flag_resets_after_successful_refresh(self):
+        # _refresh() が成功したらフラグが戻り、次の失敗が再び warning になることを確認する
+        app, root = self._app()  # GUI 無しでアプリを生成する
+        app._tick_error_logged = True  # 直前まで失敗が続いていた状態を再現する
+        app._refresh = Mock()  # 今回のティックでは _refresh() が成功するようにモックする
+        root.after.reset_mock()  # __init__ 中の after 呼び出し履歴をクリアする
+        app._tick()  # 成功するティックを実行する
+        self.assertFalse(app._tick_error_logged)  # 成功後はフラグが False に戻っている
+        app._refresh = Mock(side_effect=RuntimeError("boom again"))  # 次のティックで再び失敗するようにモックする
+        with self.assertLogs(level=logging.WARNING) as cm:  # WARNING 以上のログが出ることを捕捉する
+            app._tick()  # 復帰後の最初の失敗ティックを実行する
+        self.assertTrue(any("定期更新に失敗しました" in msg for msg in cm.output))  # 復帰後の失敗は再び warning で記録される
 
     def test_tick_survives_reschedule_failure_itself(self):
         # root.after() 自体が失敗する（例: ウィンドウ破棄中の TclError）ケースでも、

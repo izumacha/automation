@@ -108,6 +108,11 @@ class PlannerApp:
         self.tasks: list[Task] = load_tasks()  # 保存済みタスクをファイルから読み込む
         self.prefs: Prefs = load_prefs()  # 起床/就寝時刻などの設定をファイルから読み込む
         self.jobs: dict[str, str] = {}  # タスク ID → 通知ジョブ ID の対応表を空で初期化する
+        # 定期リフレッシュ（_tick）の失敗を warning で記録済みかどうかのフラグ。
+        # ティックは繰り返し実行されるため、失敗し続けると同じ warning でログが
+        # 溢れる。初回だけ warning、連続する 2 回目以降は debug に落とし、
+        # _refresh() が成功したら False に戻して次の失敗を再び warning で知らせる。
+        self._tick_error_logged: bool = False  # 定期更新の失敗を warning 済みかどうか（初回のみ warning にするためのガード）
 
         # カレンダー（デイビュー）の選択状態と描画幅。
         # 選択は Treeview ではなく「クリックされたブロックの task.id」で管理する。
@@ -976,7 +981,9 @@ class PlannerApp:
                 now = self._get_now()  # リサイズ時点の現在時刻を 1 回だけ取得する（日付と now ラインのズレを防ぐ）
                 self._render_timeline(self._planner_today(now), now)  # カレンダーを新しい幅で再描画する
             except Exception as e:  # リサイズ中の例外を捕捉してクラッシュを防ぐ
-                logging.debug("リサイズ時のカレンダー再描画に失敗しました: %s", e)  # 例外を握りつぶさずデバッグログに原因を残す
+                # 再描画の失敗はカレンダー表示が更新されない実害があるため、INFO
+                # レベルで起動するアプリでも見える warning で原因を残す（§6: エラーを握り潰さない）
+                logging.warning("リサイズ時のカレンダー再描画に失敗しました: %s", e)  # ユーザーに見える警告ログで失敗理由を残す
 
     def _on_timeline_click(self, event) -> None:
         """カレンダーのクリックを処理する。
@@ -1084,8 +1091,19 @@ class PlannerApp:
         """
         try:
             self._refresh()  # 日付・カレンダー（now ライン含む）・統計を最新状態に再描画する
+            self._tick_error_logged = False  # 更新に成功したのでフラグを戻し、次の失敗を再び warning で知らせられるようにする
         except Exception as e:  # 定期処理の失敗でアプリを落とさない（fail-safe。§9）
-            logging.debug("定期更新に失敗しました: %s", e)  # 原因をデバッグログに残す（§6: エラーを握り潰さない）
+            # _refresh() は日またぎの繰り越し・永続化・通知再スケジュールも担うため、
+            # 失敗を debug で残すと INFO レベルで起動するアプリ（cli.py の basicConfig）
+            # ではユーザーに一切見えないまま機能が黙って止まる。config.py の
+            # load_tasks と同じ理由で warning に引き上げる（§6: エラーを握り潰さない）。
+            # ただしティックは繰り返し実行されるため、連続する失敗は初回だけ warning
+            # にし、2 回目以降は debug に落としてログの氾濫を防ぐ。
+            if not self._tick_error_logged:  # この失敗が（前回成功以降）最初の失敗なら
+                self._tick_error_logged = True  # 連続する次回以降の失敗を debug に落とすためフラグを立てる
+                logging.warning("定期更新に失敗しました: %s", e)  # 初回の失敗はユーザーに見える warning で原因を残す
+            else:  # 直前のティックから失敗が続いているなら
+                logging.debug("定期更新に失敗しました（継続中）: %s", e)  # ログ溢れを防ぐため 2 回目以降はデバッグログに落とす
         finally:
             # 例外が起きても次のティックは必ず予約し直し、定期更新が完全に止まらないようにする。
             # _schedule_periodic_refresh() 自体（root.after() の呼び出し）が失敗するケース
@@ -1095,7 +1113,11 @@ class PlannerApp:
             try:
                 self._schedule_periodic_refresh()
             except Exception as e:  # 次回分の登録自体が失敗しても、原因をログへ残すだけにする
-                logging.debug("定期更新の再スケジュールに失敗しました: %s", e)  # §6: エラーを握り潰さない
+                # 再登録に失敗すると定期更新の連鎖はここで完全に止まる（以後の
+                # 繰り越し・通知再スケジュールも走らない）ため、INFO レベル起動でも
+                # 見える warning で残す。連鎖が止まる＝繰り返し出ることはないので
+                # 初回ガード（_tick_error_logged）は不要。
+                logging.warning("定期更新の再スケジュールに失敗しました: %s", e)  # 定期更新が止まったことをユーザーに見える警告ログで残す（§6: エラーを握り潰さない）
 
     def _schedule_task(self, task: Task, now: datetime.datetime | None = None) -> None:
         """開始時刻に通知するジョブを登録する（未スケジュール/過去/完了は対象外）。
