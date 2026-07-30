@@ -62,5 +62,11 @@ def current_streak(
 
 
 def total_completed(history: list[str]) -> int:
-    """これまでに完了した総件数を返す。"""
-    return len(_to_days(history, DEFAULT_WAKE_MIN, DEFAULT_SLEEP_MIN))  # プランナー日リストの要素数が総完了件数になる
+    """保持期間内に完了した件数を返す。
+
+    完了履歴は config.py が読み書き時に COMPLETION_RETENTION_DAYS
+    （現在 730 日 = 約 2 年）より古いエントリを刈り込むため、この関数が
+    数えるのは「これまでの全期間」ではなく保持期間内の完了件数になる。
+    関数名は Web/スマホ版と共有する公開契約のため変更しない。
+    """
+    return len(_to_days(history, DEFAULT_WAKE_MIN, DEFAULT_SLEEP_MIN))  # プランナー日リストの要素数が保持期間内の完了件数になる

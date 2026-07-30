@@ -108,6 +108,11 @@ class PlannerApp:
         self.tasks: list[Task] = load_tasks()  # 保存済みタスクをファイルから読み込む
         self.prefs: Prefs = load_prefs()  # 起床/就寝時刻などの設定をファイルから読み込む
         self.jobs: dict[str, str] = {}  # タスク ID → 通知ジョブ ID の対応表を空で初期化する
+        # 定期リフレッシュ（_tick）の失敗を warning で記録済みかどうかのフラグ。
+        # ティックは繰り返し実行されるため、失敗し続けると同じ warning でログが
+        # 溢れる。初回だけ warning、連続する 2 回目以降は debug に落とし、
+        # _refresh() が成功したら False に戻して次の失敗を再び warning で知らせる。
+        self._tick_error_logged: bool = False  # 定期更新の失敗を warning 済みかどうか（初回のみ warning にするためのガード）
 
         # カレンダー（デイビュー）の選択状態と描画幅。
         # 選択は Treeview ではなく「クリックされたブロックの task.id」で管理する。
@@ -367,7 +372,7 @@ class PlannerApp:
         body.rowconfigure(0, weight=1)  # Canvas が縦いっぱいに広がるよう行 0 を伸縮させる
         # timeline_tree という名前は後方互換のため踏襲（実体はカレンダー Canvas）。
         self.timeline_tree = tk.Canvas(body, bg=theme.CARD, highlightthickness=0,
-                                       height=12 * theme.HOUR_HEIGHT)  # カレンダーを描く Canvas を作る（初期高さは 12 時間分）
+                                       height=theme.CAL_INITIAL_HOURS * theme.HOUR_HEIGHT)  # カレンダーを描く Canvas を作る（初期高さはテーマの初期表示時間数ぶん）
         self.timeline_tree.grid(row=0, column=0, sticky="nsew")  # Canvas を四辺いっぱいに配置する
         sb = ttk.Scrollbar(body, orient="vertical", command=self.timeline_tree.yview)  # Canvas の縦スクロールバーを作る
         self.timeline_tree.configure(yscrollcommand=sb.set)  # スクロールバーと Canvas を連動させる
@@ -768,7 +773,7 @@ class PlannerApp:
         def y_of(dt: datetime.datetime) -> float:
             return theme.CAL_PAD_TOP + (dt - window_start).total_seconds() / 60.0 * scale  # 日時を Canvas の y 座標（ピクセル）に変換する
 
-        width = max(self._tl_width, theme.CAL_GUTTER + 80)  # 描画幅を Canvas の現在幅と最小幅の大きい方にする
+        width = max(self._tl_width, theme.CAL_GUTTER + theme.CAL_MIN_DRAW_WIDTH)  # 描画幅を Canvas の現在幅と最小幅（時刻ラベル列＋最小描画エリア）の大きい方にする
         self._draw_time_grid(cv, window_start, window_end, width, y_of)  # 正時の罫線と時刻ラベルを描く
 
         # 描画時に最低高さ（theme.CAL_MIN_BLOCK_HEIGHT px）へクランプされる極端に
@@ -863,7 +868,7 @@ class PlannerApp:
         fill, accent, text_color = self._block_colors(task, row.status)  # タスクの状態（完了・進行中・過去など）に応じた配色を取得する
         is_selected = task.id == self._tl_selected  # このタスクが現在選択中かどうかを判定する
         outline = theme.BRAND_DARK if is_selected else theme.BORDER  # 選択中なら強調色、それ以外は通常の枠色を使う
-        ow = 3 if is_selected else 1  # 選択中は枠線を太く（3px）、それ以外は細く（1px）する
+        ow = theme.CAL_SELECT_OUTLINE_W if is_selected else theme.CAL_OUTLINE_W  # 選択中は枠線を太く、それ以外は細くする（太さはテーマの寸法トークン）
         # カード本体（角丸）とカテゴリ色の左ストライプ。
         self._rounded_rect(cv, x0, y0, x1, y1, r=theme.CAL_RADIUS, fill=fill,
                            outline=outline, width=ow, tags=("task", task.id))  # タスクカード本体（角丸長方形）を描く
@@ -905,7 +910,7 @@ class PlannerApp:
                            font=theme.FONT_SMALL, tags=("task", task.id))  # 円の中にチェックマーク（✓）を描く
         else:  # 未完了なら
             cv.create_oval(cb_cx - r, cb_cy - r, cb_cx + r, cb_cy + r,
-                           outline=accent, width=2, tags=("task", task.id))  # 枠線だけの円（空のチェックボックス）を描く
+                           outline=accent, width=theme.CAL_CHECK_OUTLINE_W, tags=("task", task.id))  # 枠線だけの円（空のチェックボックス）を描く（枠線の太さはテーマのトークン）
 
         self._tl_blocks.append((x0, y0, x1, y1, cb_box, task.id, done))  # クリック判定情報をリストに追加する
 
@@ -959,9 +964,10 @@ class PlannerApp:
         if now < window_start or now > window_end:  # 現在時刻が表示ウィンドウ外なら
             return  # now ラインを描かずに処理を終える
         y = y_of(now)  # 現在時刻の y 座標を計算する
-        cv.create_line(theme.CAL_GUTTER, y, width, y, fill=theme.NOW_LINE, width=2)  # 現在時刻を示す水平線を描く
-        cv.create_oval(theme.CAL_GUTTER - 4, y - 4, theme.CAL_GUTTER + 4, y + 4,
-                       fill=theme.NOW_LINE, outline=theme.NOW_LINE)  # 水平線の左端に円（ドット）を描く
+        cv.create_line(theme.CAL_GUTTER, y, width, y, fill=theme.NOW_LINE, width=theme.NOW_LINE_W)  # 現在時刻を示す水平線を描く（線の太さはテーマのトークン）
+        cv.create_oval(theme.CAL_GUTTER - theme.NOW_DOT_R, y - theme.NOW_DOT_R,
+                       theme.CAL_GUTTER + theme.NOW_DOT_R, y + theme.NOW_DOT_R,
+                       fill=theme.NOW_LINE, outline=theme.NOW_LINE)  # 水平線の左端に円（ドット）を描く（半径はテーマのトークン）
 
     def _on_timeline_resize(self, event) -> None:
         """Canvas の幅変更に合わせてカレンダーだけを再描画する。
@@ -976,7 +982,9 @@ class PlannerApp:
                 now = self._get_now()  # リサイズ時点の現在時刻を 1 回だけ取得する（日付と now ラインのズレを防ぐ）
                 self._render_timeline(self._planner_today(now), now)  # カレンダーを新しい幅で再描画する
             except Exception as e:  # リサイズ中の例外を捕捉してクラッシュを防ぐ
-                logging.debug("リサイズ時のカレンダー再描画に失敗しました: %s", e)  # 例外を握りつぶさずデバッグログに原因を残す
+                # 再描画の失敗はカレンダー表示が更新されない実害があるため、INFO
+                # レベルで起動するアプリでも見える warning で原因を残す（§6: エラーを握り潰さない）
+                logging.warning("リサイズ時のカレンダー再描画に失敗しました: %s", e)  # ユーザーに見える警告ログで失敗理由を残す
 
     def _on_timeline_click(self, event) -> None:
         """カレンダーのクリックを処理する。
@@ -1084,8 +1092,19 @@ class PlannerApp:
         """
         try:
             self._refresh()  # 日付・カレンダー（now ライン含む）・統計を最新状態に再描画する
+            self._tick_error_logged = False  # 更新に成功したのでフラグを戻し、次の失敗を再び warning で知らせられるようにする
         except Exception as e:  # 定期処理の失敗でアプリを落とさない（fail-safe。§9）
-            logging.debug("定期更新に失敗しました: %s", e)  # 原因をデバッグログに残す（§6: エラーを握り潰さない）
+            # _refresh() は日またぎの繰り越し・永続化・通知再スケジュールも担うため、
+            # 失敗を debug で残すと INFO レベルで起動するアプリ（cli.py の basicConfig）
+            # ではユーザーに一切見えないまま機能が黙って止まる。config.py の
+            # load_tasks と同じ理由で warning に引き上げる（§6: エラーを握り潰さない）。
+            # ただしティックは繰り返し実行されるため、連続する失敗は初回だけ warning
+            # にし、2 回目以降は debug に落としてログの氾濫を防ぐ。
+            if not self._tick_error_logged:  # この失敗が（前回成功以降）最初の失敗なら
+                self._tick_error_logged = True  # 連続する次回以降の失敗を debug に落とすためフラグを立てる
+                logging.warning("定期更新に失敗しました: %s", e)  # 初回の失敗はユーザーに見える warning で原因を残す
+            else:  # 直前のティックから失敗が続いているなら
+                logging.debug("定期更新に失敗しました（継続中）: %s", e)  # ログ溢れを防ぐため 2 回目以降はデバッグログに落とす
         finally:
             # 例外が起きても次のティックは必ず予約し直し、定期更新が完全に止まらないようにする。
             # _schedule_periodic_refresh() 自体（root.after() の呼び出し）が失敗するケース
@@ -1095,7 +1114,11 @@ class PlannerApp:
             try:
                 self._schedule_periodic_refresh()
             except Exception as e:  # 次回分の登録自体が失敗しても、原因をログへ残すだけにする
-                logging.debug("定期更新の再スケジュールに失敗しました: %s", e)  # §6: エラーを握り潰さない
+                # 再登録に失敗すると定期更新の連鎖はここで完全に止まる（以後の
+                # 繰り越し・通知再スケジュールも走らない）ため、INFO レベル起動でも
+                # 見える warning で残す。連鎖が止まる＝繰り返し出ることはないので
+                # 初回ガード（_tick_error_logged）は不要。
+                logging.warning("定期更新の再スケジュールに失敗しました: %s", e)  # 定期更新が止まったことをユーザーに見える警告ログで残す（§6: エラーを握り潰さない）
 
     def _schedule_task(self, task: Task, now: datetime.datetime | None = None) -> None:
         """開始時刻に通知するジョブを登録する（未スケジュール/過去/完了は対象外）。

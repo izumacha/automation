@@ -169,8 +169,9 @@ def _atomic_write_json(path: str, payload: object) -> None:
     except Exception:  # 書き込みまたは置き換えに失敗した場合
         try:
             os.unlink(tmp_path)  # 書きかけの一時ファイルを削除して後始末する（本番ファイルは無傷のまま）
-        except OSError:  # 一時ファイルが既に無い等で削除に失敗しても
-            pass  # 後始末の失敗は致命的ではないため無視する
+        except OSError as e:  # 一時ファイルが既に無い等で削除に失敗しても
+            # 後始末の失敗は致命的ではないため無視する。
+            logging.debug("一時ファイルの後始末に失敗しました (%s): %s", tmp_path, e)  # 想定内の良性エラーなのでデバッグログにだけ原因を残す（§6: エラーを握り潰さない）
         raise  # 元の例外を呼び出し元へ再送出し、save_* 側で警告ログに残せるようにする
 
 
