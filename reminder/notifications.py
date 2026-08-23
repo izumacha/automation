@@ -13,8 +13,9 @@ from . import theme  # アプリ名（APP_NAME）などの共有トークンを�
 def _set_window_icon(root: tk.Tk) -> None:
     """SVG アイコンをウィンドウに設定する。変換ライブラリが無い場合は無視する。"""
     try:
-        import cairosvg  # type: ignore[import]  # SVG→PNG 変換ライブラリをオプションでインポートする（なければ除外）
         import importlib.resources as resources  # パッケージ同梱データをインストール形態に依存せず取得するための標準ライブラリをインポートする
+
+        import cairosvg  # type: ignore[import]  # SVG→PNG 変換ライブラリをオプションでインポートする（なければ除外）
 
         # reminder パッケージに同梱した SVG アイコンを importlib.resources 経由で参照する。
         # 旧実装は __file__ から 2 階層上（プロジェクトルート）の assets/ を直接参照して

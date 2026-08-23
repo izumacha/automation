@@ -1,10 +1,9 @@
 """tests/test_notifications.py — 通知音・デスクトップ通知・アイコン設定のテスト"""
 import subprocess
+import tkinter as tk
 import types
 import unittest
 from unittest.mock import Mock, patch
-
-import tkinter as tk
 
 from reminder import theme
 from reminder.notifications import (

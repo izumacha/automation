@@ -54,7 +54,7 @@ def coerce_int(raw: object, min_value: int, max_value: int, default: int | None 
         [min_value, max_value] にクランプされた整数。
     """
     try:
-        value = int(raw)  # type: ignore[arg-type]  # 文字列や float など任意の型を整数に変換する
+        value = int(raw)  # type: ignore[call-overload]  # 文字列や float など任意の型を整数に変換する（object 型を受けるため overload 不一致を抑制）
     except (TypeError, ValueError, OverflowError):
         # float('inf')/float('-inf') は int() が TypeError/ValueError ではなく
         # OverflowError を送出するため、他の変換不能値と同様にここで捕捉する

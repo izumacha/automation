@@ -58,3 +58,51 @@ packages = ["reminder"]
 # cairosvg を入れてもアイコン設定が常に黙ってスキップされてしまう。
 reminder = ["assets/*.svg"]
 
+
+# ---------------------------------------------------------------------------
+# ruff: lint（静的解析）設定
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100                 # 1 行の最大文字数。既定 88 だと日本語コメント行が頻繁に超える
+target-version = "py310"          # requires-python = ">=3.10" に合わせる（古い構文への書き換え提案を防ぐ）
+exclude = ["build", "dist", ".venv"]   # 生成物・仮想環境は解析対象外
+
+[tool.ruff.lint]
+select = [
+  "E",    # pycodestyle エラー（インデント、空白などの基本的な規約違反）
+  "F",    # Pyflakes（未使用 import、未定義変数など「実バグになりうる」検出）
+  "W",    # pycodestyle 警告（行末空白など）
+  "I",    # isort（import の並び順を統一）
+  "UP",   # pyupgrade（古い書き方を新しい構文へ。target-version に追従）
+  "B",    # flake8-bugbear（可変デフォルト引数など、よくある論理バグ）
+  "SIM",  # flake8-simplify（冗長な if / with のネストを簡潔に）
+]
+ignore = [
+  "E501",  # 行長超過。line-length は formatter 側の責務とし、lint では警告しない
+]
+
+[tool.ruff.lint.per-file-ignores]
+# テストでは検証用に長い定数や意図的な冗長さを許容する。
+"tests/*" = ["B011"]   # assert False の使用を許可（意図的な到達不能マーカー）
+
+# ---------------------------------------------------------------------------
+# mypy: 型検査設定
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.10"
+files = [
+  # GUI 非依存の純粋ロジック層のみを対象にする（README「設計の考え方」と整合）。
+  # tkinter に直接触れる app.py / notifications.py / cli.py は型スタブが
+  # 不完全で偽陽性が多いため、段階導入の第 1 段階では対象外とする。
+  "reminder/recurrence.py",   # 完了時点からの繰り返し計算
+  "reminder/timeline.py",     # タイムライン構築・空き時間算出
+  "reminder/stats.py",        # 完了数・連続達成日数の集計
+  "reminder/task.py",         # Task モデル・次回タスク生成
+  "reminder/time_utils.py",   # 開始までの遅延計算
+  "reminder/config.py",       # 永続化（JSON 読み書き）
+  "reminder/theme.py",        # デザイントークン定義
+]
+ignore_missing_imports = true    # 型スタブ未提供の外部ライブラリで落とさない
+warn_unused_ignores = true       # 不要になった # type: ignore を検出して腐敗を防ぐ
+warn_redundant_casts = true      # 意味のない cast() を検出
+no_implicit_optional = true      # 既定値 None の引数に暗黙の Optional を付けない（明示を強制）

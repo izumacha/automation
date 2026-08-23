@@ -211,6 +211,23 @@ python -m pytest tests                 # テスト実行
 | `test_planner.py` | 入力正規化、タイムライン/あとでへの追加・完了・削除・移動、通知スケジュール、`main` |
 | `test_theme.py` | デザイントークンとカテゴリ色割り当て |
 
+### パッケージ名について
+
+リポジトリ名・配布パッケージ名は `my-task-manager` ですが、**import 用のパッケージ名と
+コンソールコマンド名は `reminder`** です（本アプリの前身が通知リマインダーだった名残）。
+
+| 名前の種類 | 実際の値 |
+|---|---|
+| リポジトリ / 配布名（PyPI 形式） | `my-task-manager` |
+| import パッケージ | `reminder`（例: `python -m reminder`） |
+| コンソールコマンド | `reminder` |
+| デスクトップエントリ | `reminder.desktop` |
+
+`reminder` へのリネームを見送っているのは、変更が `tests/` の全 import・
+`install_reminder_app.sh`・`.desktop` エントリ・pipx で導入済み環境のコマンド名にまで
+波及する一方、実害は「README を読まずに import した場合」に限られるためです。
+名前の統一より、既存利用者のコマンドが壊れないことを優先しています。
+
 ### 設計の考え方
 
 - **ロジックと UI を分離**: ビジネスロジックは純粋関数（`timeline.py` / `stats.py` / `recurrence.py` / `task.py`）として保ち、表示層（`app.py`）を差し替えても再利用できます。

@@ -136,7 +136,7 @@ class Task:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Task":
+    def from_dict(cls, data: dict) -> Task:
         """dict から Task を復元する（未知のキーは無視）。"""
         fields = cls.__dataclass_fields__
         return cls(**{k: v for k, v in data.items() if k in fields})

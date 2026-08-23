@@ -7,9 +7,51 @@ on:
     branches: [main]
 
 jobs:
+  # ------------------------------------------------------------------
+  # 品質チェック（静的解析）ジョブ。
+  # test ジョブの 9 マトリクス（3 OS × 3 Python）に相乗りさせると同じ解析が
+  # 9 回走って CI 時間を無駄にするため、単一環境の独立ジョブとして分離する。
+  # lint は OS/バージョン非依存なので 1 回で十分。
+  # ------------------------------------------------------------------
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          # 解析ツールの動作を安定させるため固定バージョンを使う。
+          # requires-python は >=3.10 だが、型推論の精度が高い新しめの版を選ぶ。
+          python-version: "3.13"
+
+      - name: Install quality tools
+        run: |
+          # ruff / mypy は requirements-dev.txt に集約済み（pytest と同居）。
+          pip install -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        # ruff の設定（対象ルール・行長）は pyproject.toml の [tool.ruff] に集約。
+        # --output-format=github を付けると、違反箇所が PR の差分行に
+        # インラインアノテーションとして表示され、レビューで見落としにくくなる。
+        run: ruff check --output-format=github .
+
+      - name: Type check (mypy)
+        # 検査対象ファイルは pyproject.toml の [tool.mypy] files に列挙しているため
+        # ここでは引数を渡さない（対象の定義を 1 か所に集約し、CI と手元実行を一致させる）。
+        # 対象は GUI 非依存の純粋ロジック層のみ。tkinter に触れる app.py 等は
+        # 外部スタブが不完全で偽陽性が多いため、意図的に除外している。
+        run: mypy
+
+  # ------------------------------------------------------------------
+  # テストジョブ（既存）。クロスプラットフォーム対応の回帰検証が目的なので
+  # OS × Python のマトリクスはそのまま維持する。
+  # ------------------------------------------------------------------
   test:
     runs-on: ${{ matrix.os }}
     strategy:
+      # 1 つの組み合わせが落ちても残りを最後まで走らせ、
+      # 「特定 OS だけの問題」か「全環境の問題」かを 1 回の CI で切り分ける。
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.11", "3.12", "3.13"]

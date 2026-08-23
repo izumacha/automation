@@ -8,7 +8,10 @@ from __future__ import annotations  # Python 3.9 以前でも型ヒントを文�
 import datetime  # 日時オブジェクトを生成するための標準ライブラリをインポートする
 import unittest  # Python 標準のユニットテストフレームワークをインポートする
 
-from reminder.time_utils import MAX_AFTER_MS, delay_ms_until  # テスト対象の関数と定数をインポートする
+from reminder.time_utils import (  # テスト対象の関数と定数をインポートする
+    MAX_AFTER_MS,
+    delay_ms_until,
+)
 
 
 class DelayMsUntilNormalCaseTests(unittest.TestCase):
