@@ -79,19 +79,22 @@ def _handle_refused_save(path: str, payload: object) -> None:
     警告ログを残し、通知には復旧用ファイル無し（None）として伝える。
     """
     global _save_blocked_notified  # 「通知済み」フラグを書き換えるため global 宣言する
-    write_path = path + _RECOVERY_SUFFIX  # 退避先ファイルのパス（本体パス + .recovery）を組み立てる（必ず str）
-    recovery_path: str | None = write_path  # 通知側へ渡す復旧用ファイルのパス（退避に失敗したら後で None に切り替える）
+    # 以下の 2 変数はどちらも同じ「復旧用ファイル」を指すが、役割と型が違うので分けている。
+    # recovery_path: 書き込み先そのもの。必ず文字列で、退避に失敗しても変わらない（ログにも使う）。
+    # notified_recovery_path: 通知側へ渡す値。退避に失敗したときだけ None（＝復旧用ファイル無し）へ切り替える。
+    recovery_path = path + _RECOVERY_SUFFIX  # 退避先ファイルのパス（本体パス + .recovery）を組み立てる
+    notified_recovery_path: str | None = recovery_path  # 通知側へ渡す復旧用ファイルのパス（退避に失敗したら後で None に切り替える）
     try:
-        _atomic_write_json(write_path, payload)  # 本体と同じ原子的書き込みで変更内容を復旧用ファイルへ退避保存する
-        logging.warning("保存できなかった内容を復旧用ファイルへ退避保存しました (%s)", write_path)  # 退避先の場所をログで案内する
+        _atomic_write_json(recovery_path, payload)  # 本体と同じ原子的書き込みで変更内容を復旧用ファイルへ退避保存する
+        logging.warning("保存できなかった内容を復旧用ファイルへ退避保存しました (%s)", recovery_path)  # 退避先の場所をログで案内する
     except Exception as e:  # 退避保存自体に失敗した場合（本体が読めない状況ではディスク側の異常が続いている可能性が高い）
-        logging.warning("復旧用ファイルへの退避保存に失敗しました (%s): %s", write_path, e)  # 退避失敗も握り潰さずログに残す（§6）
-        recovery_path = None  # 通知側へ「復旧用ファイルは作れなかった」ことを伝えるため None にする
+        logging.warning("復旧用ファイルへの退避保存に失敗しました (%s): %s", recovery_path, e)  # 退避失敗も握り潰さずログに残す（§6）
+        notified_recovery_path = None  # 通知側へ「復旧用ファイルは作れなかった」ことを伝えるため None にする
     if _save_blocked_notified or _save_blocked_listener is None:  # すでに通知済み、または通知先が未登録なら
         return  # 二重通知や無意味な呼び出しをせず処理を終える
     _save_blocked_notified = True  # このセッションでは通知済みであることを記録する（通知は 1 回だけ）
     try:
-        _save_blocked_listener(path, recovery_path)  # 登録済みコールバックに保存拒否と復旧用ファイルの場所を知らせる
+        _save_blocked_listener(path, notified_recovery_path)  # 登録済みコールバックに保存拒否と復旧用ファイルの場所（作れなければ None）を知らせる
     except Exception as e:  # 通知側（UI 層）の失敗で永続化層が巻き込まれないよう捕捉する（fail-safe）
         logging.warning("保存拒否の通知コールバックの実行に失敗しました: %s", e)  # 通知失敗も握り潰さずログに残す（§6）
 

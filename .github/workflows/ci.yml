@@ -36,10 +36,10 @@ jobs:
         run: ruff check --output-format=github .
 
       - name: Type check (mypy)
-        # 検査対象ファイルは pyproject.toml の [tool.mypy] files に列挙しているため
-        # ここでは引数を渡さない（対象の定義を 1 か所に集約し、CI と手元実行を一致させる）。
-        # 対象は GUI 非依存の純粋ロジック層のみ。tkinter に触れる app.py 等は
-        # 外部スタブが不完全で偽陽性が多いため、意図的に除外している。
+        # 検査対象は pyproject.toml の [tool.mypy] に定義しているため、ここでは引数を渡さない
+        # （対象の定義を 1 か所に集約し、CI と手元の `mypy` を必ず同じ範囲にする）。
+        # reminder/ 全体を既定で検査し、tkinter に直接触れる層だけを overrides で除外する
+        # denylist 方式にしているので、新しく足したモジュールは自動的に検査対象へ入る。
         run: mypy
 
   # ------------------------------------------------------------------

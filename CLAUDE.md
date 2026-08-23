@@ -18,12 +18,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install -r requirements.txt          # 実行用の依存をインストール
-pip install -r requirements-dev.txt      # 開発・テスト用の依存をインストール
+pip install -r requirements-dev.txt      # 開発・テスト用の依存をインストール（pytest / ruff / mypy）
 python -m reminder                       # アプリ起動（エントリーポイント）
 python -m pytest tests                   # 全ユニットテスト
+ruff check .                             # lint（設定は pyproject.toml の [tool.ruff]）
+mypy                                     # 型検査（対象は pyproject.toml の [tool.mypy]。引数を渡さない）
 ```
 
 特定モジュールのテストは `python -m pytest tests/test_recurrence.py` のようにファイル単位で実行する。
+
+上の `pytest` / `ruff check .` / `mypy` の 3 つが CI（`.github/workflows/ci.yml` の `test` / `quality` ジョブ）と同じ検証コマンドで、§14 が言う「PR 前に通すローカル検証コマンド」はこの 3 つを指す。
+
+mypy は `reminder/` 全体を既定で検査し、除外は `[tool.mypy.overrides]` に明示する **denylist 方式**（新規モジュールを列挙へ足し忘れて黙って検査対象外になるのを防ぐため）。現在の除外は `reminder.app` のみで、その理由と解除条件は `pyproject.toml` の該当コメントに書いてある。
 
 ## 3. アーキテクチャ
 
