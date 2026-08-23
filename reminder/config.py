@@ -12,8 +12,8 @@ import logging
 import os
 import tempfile
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from typing import Callable
 
 from .task import ISO_FMT, Task
 from .timeline import DEFAULT_SLEEP_MIN, DEFAULT_WAKE_MIN, hhmm_to_min, min_to_hhmm
@@ -79,12 +79,13 @@ def _handle_refused_save(path: str, payload: object) -> None:
     警告ログを残し、通知には復旧用ファイル無し（None）として伝える。
     """
     global _save_blocked_notified  # 「通知済み」フラグを書き換えるため global 宣言する
-    recovery_path: str | None = path + _RECOVERY_SUFFIX  # 復旧用ファイルのパス（本体パス + .recovery）を組み立てる
+    write_path = path + _RECOVERY_SUFFIX  # 退避先ファイルのパス（本体パス + .recovery）を組み立てる（必ず str）
+    recovery_path: str | None = write_path  # 通知側へ渡す復旧用ファイルのパス（退避に失敗したら後で None に切り替える）
     try:
-        _atomic_write_json(recovery_path, payload)  # 本体と同じ原子的書き込みで変更内容を復旧用ファイルへ退避保存する
-        logging.warning("保存できなかった内容を復旧用ファイルへ退避保存しました (%s)", recovery_path)  # 退避先の場所をログで案内する
+        _atomic_write_json(write_path, payload)  # 本体と同じ原子的書き込みで変更内容を復旧用ファイルへ退避保存する
+        logging.warning("保存できなかった内容を復旧用ファイルへ退避保存しました (%s)", write_path)  # 退避先の場所をログで案内する
     except Exception as e:  # 退避保存自体に失敗した場合（本体が読めない状況ではディスク側の異常が続いている可能性が高い）
-        logging.warning("復旧用ファイルへの退避保存に失敗しました (%s): %s", recovery_path, e)  # 退避失敗も握り潰さずログに残す（§6）
+        logging.warning("復旧用ファイルへの退避保存に失敗しました (%s): %s", write_path, e)  # 退避失敗も握り潰さずログに残す（§6）
         recovery_path = None  # 通知側へ「復旧用ファイルは作れなかった」ことを伝えるため None にする
     if _save_blocked_notified or _save_blocked_listener is None:  # すでに通知済み、または通知先が未登録なら
         return  # 二重通知や無意味な呼び出しをせず処理を終える

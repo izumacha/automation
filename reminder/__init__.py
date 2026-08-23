@@ -28,6 +28,10 @@ from .recurrence import (
 )
 from .stats import completed_count_on, current_streak, total_completed
 from .task import Task, build_next_task, make_due
+from .time_utils import (
+    STATUS_IDLE,
+    delay_ms_until,
+)
 from .timeline import (
     backlog_tasks,
     build_day_timeline,
@@ -36,10 +40,6 @@ from .timeline import (
     free_minutes_today,
     prune_old_completed,
     suggest_for_free_time,
-)
-from .time_utils import (
-    STATUS_IDLE,
-    delay_ms_until,
 )
 
 # GUI（tkinter）依存のシンボル名と「定義元モジュール名」の対応表。

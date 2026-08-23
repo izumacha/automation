@@ -21,9 +21,10 @@ import datetime
 import logging
 import os
 import tkinter as tk
+from collections.abc import Callable
 from tkinter import messagebox, ttk
-from typing import Callable
 
+from . import theme
 from .config import (
     Prefs,
     load_prefs,
@@ -43,7 +44,6 @@ from .recurrence import (
     unit_for_label,
 )
 from .stats import completed_count_on, current_streak
-from . import theme
 from .task import (
     DEFAULT_DURATION,
     ISO_FMT,
@@ -54,6 +54,16 @@ from .task import (
     coerce_duration,
     coerce_interval,
     make_due,
+)
+from .time_utils import (
+    HOUR_MAX,
+    HOUR_MIN,
+    MINUTE_MAX,
+    MINUTE_MIN,
+    REFRESH_INTERVAL_MS,
+    STATUS_IDLE,
+    coerce_int,
+    delay_ms_until,
 )
 from .timeline import (
     DEFAULT_SLEEP_MIN,
@@ -74,16 +84,6 @@ from .timeline import (
     planner_day,
     prune_old_completed,
     suggest_for_free_time,
-)
-from .time_utils import (
-    HOUR_MAX,
-    HOUR_MIN,
-    MINUTE_MAX,
-    MINUTE_MIN,
-    REFRESH_INTERVAL_MS,
-    STATUS_IDLE,
-    coerce_int,
-    delay_ms_until,
 )
 
 _WEEKDAY_JA = ("月", "火", "水", "木", "金", "土", "日")
