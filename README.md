@@ -193,10 +193,15 @@ pip install -r requirements.txt   # まだの場合
 
 ```bash
 pip install -r requirements.txt        # 実行用
-pip install -r requirements-dev.txt    # 開発・テスト用（pytest を含む）
+pip install -r requirements-dev.txt    # 開発・テスト用（pytest / ruff / mypy を含む）
 
 python -m pytest tests                 # テスト実行
+ruff check .                           # lint（import 順・未使用 import など）
+mypy                                   # 型検査（対象は pyproject.toml の [tool.mypy]）
 ```
+
+上記 3 つは CI（`.github/workflows/ci.yml`）が実行する検証とそのまま同じもの。
+PR を出す前にこの 3 つをローカルで通しておくと、CI 側で初めて気づく指摘を減らせる。
 
 ロジック（繰り返し計算・タイムライン構築・統計など）は GUI 非依存の純粋関数として実装しているため、tkinter なしでテストできます。テストの観点は次のとおりです。
 
@@ -255,7 +260,7 @@ my-task-manager/
 │       └── reminder_icon.svg   # アプリ用アイコン（wheel にも同梱されるようパッケージ内に配置）
 ├── install_reminder_app.sh     # Linux 向けデスクトップエントリ生成スクリプト
 ├── requirements.txt            # 実行用依存（必須なし。cairosvg はオプション、pyproject.toml の [icon] extra 参照）
-├── requirements-dev.txt        # 開発・テスト用依存（pytest）
+├── requirements-dev.txt        # 開発・テスト用依存（pytest / ruff / mypy）
 ├── pyproject.toml              # パッケージ定義・console-scripts
 └── tests/                      # ユニットテスト（モジュール別）
 ```

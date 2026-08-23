@@ -63,7 +63,9 @@ reminder = ["assets/*.svg"]
 # ruff: lint（静的解析）設定
 # ---------------------------------------------------------------------------
 [tool.ruff]
-target-version = "py310"          # requires-python = ">=3.10" に合わせる（古い構文への書き換え提案を防ぐ）
+# 注: target-version は指定しない。ruff は上の requires-python = ">=3.10" から
+#     自動で推論する（`ruff check --show-settings` で 3.10 と確認済み）。ここに数字を
+#     書くと、将来 requires-python を上げたときに古い値が推論に勝って黙って食い違う。
 # 注: exclude は指定しない。build / dist / .venv は ruff の既定 exclude に既に含まれており、
 #     書き足すと「既定を上書きした」ように読めて、既定側が変わったときに追随できなくなる。
 # 注: line-length も指定しない。下の ignore で E501（行長超過）を無効にしており、
@@ -98,6 +100,11 @@ ignore = [
 # ---------------------------------------------------------------------------
 [tool.mypy]
 python_version = "3.10"
+# 型検査の対象プラットフォームを固定する。未指定だと mypy は実行中の OS を見るため、
+# OS ごとに分岐する箇所（notifications.py の winsound など）の結果が手元と CI で食い違い、
+# 「ある OS でだけ warn_unused_ignores が誤発火する」不安定な状態になる。
+# CI の quality ジョブは ubuntu-latest なので linux に揃える。
+platform = "linux"
 # パッケージ全体を既定で検査対象にする（denylist 方式）。
 # 対象を 1 ファイルずつ列挙する allowlist 方式にすると、新しく追加した純粋ロジック
 # モジュールを列挙へ足し忘れたときに「黙って検査対象外」になり、明らかな型エラーでも
@@ -112,20 +119,29 @@ no_implicit_optional = true      # 既定値 None の引数に暗黙の Optional
 #     将来スタブが要る依存を足したときに「型が付いていない」ことを黙って握り潰すため。
 #     スタブが無い依存は下の overrides でモジュール単位に限定して許可する。
 
-# GUI（tkinter）に直接触れる層は検査対象から外す。
-# 型スタブが実際の tkinter API を十分に表現しておらず（例: Canvas.create_text の
-# overload 不一致）、偽陽性が支配的で信号にならないため。純粋ロジックと表示層を
-# 分けている設計（README「設計の考え方」）の境界と一致させている。
-# 検査対象に戻すときは、この overrides から該当モジュールを消すだけでよい。
+# app.py（PlannerApp の描画・イベント処理）だけを検査対象から外す。
+# 外した理由を正確に書いておく。ここを消すと現状 16 件のエラーが出るが、
+# その内訳は 1 件と 15 件で性質がまったく違う:
+#   - 1 件は tkinter スタブ由来の偽陽性（Canvas.create_text の overload 不一致）。
+#     上流の typeshed が直らない限りこちらでは消せない。
+#   - 15 件は本リポジトリ自身のコードで直せるもので、_render_calendar() の
+#     `task_rows = [r for r in rows if ... and r.task is not None]` を mypy が
+#     追えず、以降 row.task が Task | None のまま扱われることに由来する
+#     （TimelineRow と Task を組にして返すなどの小さな整理で解消できる見込み）。
+# つまり「上流待ち」ではなく「こちらの宿題」が大半なので、外したままにせず、
+# 別 PR で 15 件を解消 →（残る 1 件は disable_error_code で個別に落として）
+# app.py も検査対象へ戻す。その時点でこの overrides ごと削除する。
 [[tool.mypy.overrides]]
 module = [
   "reminder.app",             # tkinter ウィジェット・Canvas 描画
-  "reminder.notifications",   # winsound / cairosvg など OS 依存・オプション依存
 ]
 ignore_errors = true
 
-# cairosvg は型スタブを提供していないオプション依存のため、この 1 モジュールに限って
+# cairosvg は型スタブを提供していないオプション依存で、quality ジョブでは
+# インストールもされない（requirements-dev.txt に無い）。この 1 モジュールに限って
 # インポート解決の失敗を許可する（ImportError 時に graceful degradation する設計）。
+# 実際に効いていることは確認済み: この override を消すと
+# notifications.py:18 で import-not-found が出る。
 [[tool.mypy.overrides]]
 module = ["cairosvg.*"]
 ignore_missing_imports = true
