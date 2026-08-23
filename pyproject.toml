@@ -63,9 +63,13 @@ reminder = ["assets/*.svg"]
 # ruff: lint（静的解析）設定
 # ---------------------------------------------------------------------------
 [tool.ruff]
-line-length = 100                 # 1 行の最大文字数。既定 88 だと日本語コメント行が頻繁に超える
 target-version = "py310"          # requires-python = ">=3.10" に合わせる（古い構文への書き換え提案を防ぐ）
-exclude = ["build", "dist", ".venv"]   # 生成物・仮想環境は解析対象外
+# 注: exclude は指定しない。build / dist / .venv は ruff の既定 exclude に既に含まれており、
+#     書き足すと「既定を上書きした」ように読めて、既定側が変わったときに追随できなくなる。
+# 注: line-length も指定しない。下の ignore で E501（行長超過）を無効にしており、
+#     行長を見る他のルール（W505）も未選択、`ruff format` も CI に無いため、
+#     値を書いても実際には誰も参照しない死んだ設定になるため（§6 デッドコードを残さない）。
+#     将来 `ruff format` を導入するときに、その PR で line-length も一緒に決める。
 
 [tool.ruff.lint]
 select = [
@@ -78,31 +82,50 @@ select = [
   "SIM",  # flake8-simplify（冗長な if / with のネストを簡潔に）
 ]
 ignore = [
-  "E501",  # 行長超過。line-length は formatter 側の責務とし、lint では警告しない
+  # 行長超過。CLAUDE.md §5 が「実行行 1 行ごとに日本語コメントを添える」ことを求めており、
+  # 行末コメントの分だけ行が伸びるのは本リポジトリでは正常な状態（現に 1,600 行以上が
+  # 100 文字を超えている）。ここを有効にすると新規コードの指摘ではなく既存コードの
+  # ノイズで埋まるため、行長は機械的には強制しない、という意図的な選択。
+  "E501",
 ]
 
-[tool.ruff.lint.per-file-ignores]
-# テストでは検証用に長い定数や意図的な冗長さを許容する。
-"tests/*" = ["B011"]   # assert False の使用を許可（意図的な到達不能マーカー）
+# per-file-ignores は現時点で不要なため置かない。
+# 「将来使うかもしれない」ignore を先回りで足すと、なぜ必要なのか読み手に伝わらないまま
+# 残り続けて検出網を静かに緩めるので、実際に違反が出た時点で理由と一緒に追加する。
 
 # ---------------------------------------------------------------------------
 # mypy: 型検査設定
 # ---------------------------------------------------------------------------
 [tool.mypy]
 python_version = "3.10"
-files = [
-  # GUI 非依存の純粋ロジック層のみを対象にする（README「設計の考え方」と整合）。
-  # tkinter に直接触れる app.py / notifications.py / cli.py は型スタブが
-  # 不完全で偽陽性が多いため、段階導入の第 1 段階では対象外とする。
-  "reminder/recurrence.py",   # 完了時点からの繰り返し計算
-  "reminder/timeline.py",     # タイムライン構築・空き時間算出
-  "reminder/stats.py",        # 完了数・連続達成日数の集計
-  "reminder/task.py",         # Task モデル・次回タスク生成
-  "reminder/time_utils.py",   # 開始までの遅延計算
-  "reminder/config.py",       # 永続化（JSON 読み書き）
-  "reminder/theme.py",        # デザイントークン定義
-]
-ignore_missing_imports = true    # 型スタブ未提供の外部ライブラリで落とさない
+# パッケージ全体を既定で検査対象にする（denylist 方式）。
+# 対象を 1 ファイルずつ列挙する allowlist 方式にすると、新しく追加した純粋ロジック
+# モジュールを列挙へ足し忘れたときに「黙って検査対象外」になり、明らかな型エラーでも
+# CI が緑のまま通ってしまう（＝足し忘れが唯一かつ無警告の失敗モードになる）。
+# 逆にここを既定 ON にしておけば、新規ファイルは自動的に検査され、外したいときだけ
+# 下の overrides に理由付きで明示する必要が生じる（fail-closed）。
+files = ["reminder"]
 warn_unused_ignores = true       # 不要になった # type: ignore を検出して腐敗を防ぐ
 warn_redundant_casts = true      # 意味のない cast() を検出
 no_implicit_optional = true      # 既定値 None の引数に暗黙の Optional を付けない（明示を強制）
+# 注: ignore_missing_imports はグローバルには有効にしない。全体に効かせると、
+#     将来スタブが要る依存を足したときに「型が付いていない」ことを黙って握り潰すため。
+#     スタブが無い依存は下の overrides でモジュール単位に限定して許可する。
+
+# GUI（tkinter）に直接触れる層は検査対象から外す。
+# 型スタブが実際の tkinter API を十分に表現しておらず（例: Canvas.create_text の
+# overload 不一致）、偽陽性が支配的で信号にならないため。純粋ロジックと表示層を
+# 分けている設計（README「設計の考え方」）の境界と一致させている。
+# 検査対象に戻すときは、この overrides から該当モジュールを消すだけでよい。
+[[tool.mypy.overrides]]
+module = [
+  "reminder.app",             # tkinter ウィジェット・Canvas 描画
+  "reminder.notifications",   # winsound / cairosvg など OS 依存・オプション依存
+]
+ignore_errors = true
+
+# cairosvg は型スタブを提供していないオプション依存のため、この 1 モジュールに限って
+# インポート解決の失敗を許可する（ImportError 時に graceful degradation する設計）。
+[[tool.mypy.overrides]]
+module = ["cairosvg.*"]
+ignore_missing_imports = true
