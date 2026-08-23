@@ -15,7 +15,7 @@ def _set_window_icon(root: tk.Tk) -> None:
     try:
         import importlib.resources as resources  # パッケージ同梱データをインストール形態に依存せず取得するための標準ライブラリをインポートする
 
-        import cairosvg  # type: ignore[import]  # SVG→PNG 変換ライブラリをオプションでインポートする（なければ除外）
+        import cairosvg  # SVG→PNG 変換ライブラリをオプションでインポートする（なければ除外）
 
         # reminder パッケージに同梱した SVG アイコンを importlib.resources 経由で参照する。
         # 旧実装は __file__ から 2 階層上（プロジェクトルート）の assets/ を直接参照して
@@ -72,7 +72,10 @@ def _play_windows_sound() -> None:
     """Windows: winsound.MessageBeep で警告音を再生する。"""
     import winsound  # Windows 専用の音声再生モジュールをインポートする
 
-    winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)  # 警告（！）アイコンに対応するシステム音を鳴らす
+    # typeshed の winsound スタブは中身を `sys.platform == "win32"` で囲っているため、
+    # linux を対象に型検査する本リポジトリ（pyproject.toml の [tool.mypy] platform）では
+    # 属性が見えず attr-defined になる。実行時はこの関数を Windows でしか呼ばないので抑制する。
+    winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)  # type: ignore[attr-defined]  # 警告（！）アイコンに対応するシステム音を鳴らす
 
 
 def _send_linux_notification(body: str = "") -> None:
