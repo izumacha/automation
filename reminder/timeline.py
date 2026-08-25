@@ -16,16 +16,6 @@ from .task import ISO_FMT, Task
 # このモジュールのログ出力先（想定外の行を捨てたことを記録するために使う）
 logger = logging.getLogger(__name__)
 
-# scheduled_rows が「タスク行なのに Task が無い」行を捨てたことを、既に warning で報せたか。
-# scheduled_rows は再描画のたびに呼ばれる（既定 60 秒周期の定期更新に加え、ウィンドウを
-# ドラッグしている間は幅が動くたび）ため、毎回 warning を出すと同じ 1 行でログが埋まり、
-# 残したかった「予定が消えた手がかり」を自分のノイズで潰してしまう。PlannerApp._tick の
-# _tick_error_logged と同じ方式で、初回だけ warning・以降は debug に落とし、欠落が
-# 解消した呼び出しでフラグを戻す。
-# 純粋関数の集まりであるこのモジュールに唯一置く可変状態なので、ここに集約して意図を明記する
-# （テストは reminder.timeline._dropped_row_warned を setUp で False に戻して独立させる）。
-_dropped_row_warned = False
-
 # タイムライン行の種別
 ROW_TASK = "task"
 ROW_FREE = "free"
@@ -87,7 +77,7 @@ class TimelineRow:
     status: str = ""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class ScheduledRow:
     """タスク行（ROW_TASK）を「Task が必ずある」形で表した読み取り専用のビュー。
 
@@ -106,6 +96,18 @@ class ScheduledRow:
     作れてしまう。``scheduled_rows`` だけが生成経路である以上その組み方は現れないが、
     そもそも表現できない形にしておく方が安全（§9 fail-safe）。
 
+    ``eq=False``（同一性で比較・ハッシュする）にしているのは、値としての等価を
+    名乗ると **可変な Task を抱えた辞書キー**になってしまうため。``Task`` は完了操作や
+    ``carry_over_overdue`` が ``completed`` / ``due`` を書き換える可変 dataclass なので、
+    値等価だと「辞書へ入れた後にタスクが変化すると、同じ内容で作り直したキーで
+    引けなくなる」典型的な壊れ方をする。さらに自動生成のハッシュは全フィールドを
+    ``hash()`` に掛けるため、可変な ``Task`` を含むこのクラスは実行時 unhashable に
+    なる一方、**mypy は frozen dataclass を hashable とみなす**（＝``set(entries)`` が
+    型検査を素通りして実行時にだけ落ちる、この PR が潰そうとしている形の乖離）。
+    同一性比較なら型と実行時が一致し、タスクが変化してもキーとして引けるままになる。
+    値で比べたい場面は今のところ無く（レーン割り当ては ``task.id`` をキーにしている）、
+    必要になったら比べたい軸を明示して足す。
+
     将来案: 根本原因は ``TimelineRow`` が ``kind`` の値で意味の変わる弱い型である
     こと自体で、本クラスはその上に被せた回避策にすぎない。``rows`` を直接なめる
     他の消費者（``free_minutes_today`` / ``max_free_slot``、CLAUDE.md §10 が想定する
@@ -122,23 +124,6 @@ class ScheduledRow:
     status: str  # タスク行の状態（STATUS_DONE / NOW / PAST / UPCOMING）
     task: Task  # その行が指すタスク（None にはならない）
 
-    def __hash__(self) -> int:
-        """自動生成のハッシュを、Task の同一性キー（id）を使う形へ差し替える。
-
-        ``frozen=True`` の dataclass が自動生成するハッシュは全フィールドを
-        ``hash()`` に掛けるが、``Task`` は ``carry_over_overdue`` が ``due`` を
-        書き換える可変 dataclass なので値としてハッシュできず、``TypeError`` になる。
-        一方 **mypy は frozen dataclass を hashable とみなす**ため、
-        ``set(entries)`` や ``{entry: lane}`` と書いても型検査は素通りし、
-        実行時にだけ落ちる — 型と実行時が食い違う、この PR が潰そうとしている
-        まさにその形の穴になってしまう。
-
-        ``Task`` の同一性は不変な ``id``（uuid）で決まるので、これを使えば
-        実行時にもハッシュでき、``__eq__``（全フィールド比較）との整合も保てる
-        （``Task`` が等しければ ``id`` も等しいため、等しい値は必ず同じハッシュになる）。
-        """
-        # 可変な Task 本体ではなく、不変な id を使ってハッシュを組み立てる
-        return hash((self.start, self.end, self.status, self.task.id))
 
 
 def scheduled_rows(rows: list[TimelineRow]) -> list[ScheduledRow]:
@@ -161,28 +146,26 @@ def scheduled_rows(rows: list[TimelineRow]) -> list[ScheduledRow]:
     Returns:
         タスク行のビューのリスト（入力の並び順を保つ）。
     """
-    global _dropped_row_warned  # 「既に警告済みか」の目印を更新するため参照する
     entries: list[ScheduledRow] = []  # 組み直した結果を溜めるリストを初期化する
     dropped = 0  # この呼び出しで捨てたタスク行の件数を数える
     for row in rows:  # タイムライン行を先頭から順に見る（並び順をそのまま保つ）
         if row.kind != ROW_TASK:  # 空き時間行は対象外なので
             continue  # 何もせず次の行へ進む
         if row.task is None:  # タスク行なのに Task が欠けている（本来ありえない）場合
-            dropped += 1  # 捨てた件数を 1 増やす（ログの出し方は走査後にまとめて決める）
+            dropped += 1  # 捨てた件数を 1 増やす（ログは走査後にまとめて 1 行出す）
             continue  # 描画側へ None を渡さないようこの行は落とす
         # ここまで来れば row.task は Task 型に確定しているので、必要な値を写し取る
         entries.append(ScheduledRow(start=row.start, end=row.end, status=row.status, task=row.task))
 
     if dropped:  # 1 件でも捨てていたら、その事実を記録に残す（§6 エラーを握り潰さない）
-        # 件数だけを出し、タスク名や時刻は載せない（利用者の予定内容をログへ写さないため）
-        message = "タスク行に Task がありません。%d 件を表示から除外しました。"
-        if not _dropped_row_warned:  # 前回のきれいな呼び出し以降で最初の欠落なら
-            _dropped_row_warned = True  # 以降の連続する欠落を debug に落とすため目印を立てる
-            logger.warning(message, dropped)  # 初回は利用者に見える warning で残す
-        else:  # 直前の呼び出しから欠落が続いているなら
-            logger.debug(message, dropped)  # ログ溢れを防ぐため 2 回目以降は debug に落とす
-    else:  # 捨てた行が 1 件も無かったなら
-        _dropped_row_warned = False  # 欠落が解消したので、次の発生を再び warning で知らせられるよう戻す
+        # 件数だけを出し、タスク名や時刻は載せない（利用者の予定内容をログへ写さないため）。
+        # 再描画のたびに呼ばれる関数なので、この状態に陥れば同じ警告が繰り返し出る。
+        # 初回だけ warning に落とす抑制は入れない: この分岐はそもそも到達不能で
+        # （build_day_timeline が唯一の生成元で、ROW_TASK には必ず task を渡す）、
+        # 到達したときは build_day_timeline 側が壊れている＝繰り返し鳴ってほしい状況。
+        # 抑制のためにモジュール変数を持つと、純粋関数として保つと決めているこのモジュール
+        # （CLAUDE.md §3 / 付録 B）に唯一の可変状態が入り、呼び出し順で結果が変わってしまう
+        logger.warning("タスク行に Task がありません。%d 件を表示から除外しました。", dropped)
 
     return entries  # 入力順を保ったタスク行ビューのリストを返す
 

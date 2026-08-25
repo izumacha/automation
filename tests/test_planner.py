@@ -14,6 +14,7 @@ from reminder.config import Prefs
 from reminder.recurrence import RECUR_DAILY, RECUR_LABELS
 from reminder.task import DEFAULT_DURATION, ISO_FMT, Task
 from reminder.time_utils import REFRESH_INTERVAL_MS
+from reminder.timeline import STATUS_UPCOMING, ScheduledRow
 
 
 class _DummyVar:
@@ -760,6 +761,34 @@ class CalendarRenderTests(AppTestCase):
             cb_left, _cb_top, cb_right, _cb_bottom = cb_box  # チェックボックスの判定領域の左右端を取り出す
             self.assertGreaterEqual(cb_left, x0 - 1e-6)  # 判定領域がブロック左端より内側にあること
             self.assertLessEqual(cb_right, x1 + 1e-6)  # 判定領域がブロック右端を超えて隣のレーンへはみ出さないこと（誤爆防止）
+
+    def test_assign_lanes_separates_overlaps_given_unsorted_input(self):
+        # _assign_lanes は「開始時刻の昇順で処理する」前提のスイープライン方式。
+        # active から取り除く条件（end > entry.start）は昇順でしか正しくなく、
+        # 順不同だと「まだ重なっている相手が先に active から消える」ことが起きて、
+        # 重なるカードが同じレーンに乗る＝画面上で重なって隠れる。
+        # ところが実際の入力は build_day_timeline が開始順に返し scheduled_rows も
+        # その順を保つため、関数内の sorted() を消しても他のテストは全件通ってしまう。
+        # 並べ替えが load-bearing であることをここで固定する。
+        #
+        # 反例（総当たりで発見した最小形）: A 9:48-10:03 / B 9:30-9:45 /
+        # C 10:12-10:27 / D 9:39-9:54 を A→D→C→B の順に処理すると、
+        # C(10:12) の時点で A と D が active から一掃され、その後の B が D と
+        # 同じレーン 1 を取ってしまう（B と D は 9:39-9:45 で重なっている）。
+        base = datetime.datetime(2026, 6, 6, 9, 0)
+        spans = [("A", 48), ("B", 30), ("C", 72), ("D", 39)]  # (名前, 開始オフセット分)。所要はいずれも 15 分
+        entries = {}
+        for title, offset in spans:
+            start = base + datetime.timedelta(minutes=offset)
+            entries[title] = ScheduledRow(
+                start=start,
+                end=start + datetime.timedelta(minutes=15),
+                status=STATUS_UPCOMING,
+                task=Task(title=title, due=_iso(start), duration_min=15),
+            )
+        lanes = PlannerApp._assign_lanes([entries[t] for t in ("A", "D", "C", "B")])  # 順不同で渡す
+        # B(9:30-9:45) と D(9:39-9:54) は重なっているので、必ず別レーンでなければならない
+        self.assertNotEqual(lanes[entries["B"].task.id], lanes[entries["D"].task.id])
 
     def test_short_consecutive_tasks_do_not_visually_overlap(self):
         # 所要時間が短いタスク（描画時に theme.CAL_MIN_BLOCK_HEIGHT へクランプされる）が

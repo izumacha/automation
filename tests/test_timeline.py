@@ -2,7 +2,6 @@
 import datetime
 import unittest
 
-from reminder import timeline
 from reminder.task import Task
 from reminder.timeline import (
     ROW_FREE,
@@ -502,11 +501,6 @@ class ScheduledRowTests(unittest.TestCase):
     「何を残し・何を落とすか」と「入力の並び順を保つか」をここで固定する。
     """
 
-    def setUp(self):
-        # scheduled_rows は「初回だけ warning・以降は debug」の抑制フラグをモジュール変数で
-        # 持つため、テスト間で状態が漏れないよう毎回リセットして独立させる
-        timeline._dropped_row_warned = False
-
     @staticmethod
     def _row(hour, title):
         """指定時刻に始まる 30 分のタスク行を 1 件組み立てる（並び順検証用）。"""
@@ -565,45 +559,31 @@ class ScheduledRowTests(unittest.TestCase):
         entries = scheduled_rows(rows)
         self.assertEqual([e.task.title for e in entries], ["朝会", "夕会"])
 
-    def test_broken_row_warns_once_then_falls_back_to_debug(self):
-        # 捨てた事実はログに残す（§6 エラーを握り潰さない）。ただし scheduled_rows は
-        # 再描画のたびに呼ばれるので、連続する欠落は初回だけ warning にしてログ溢れを防ぐ
-        broken = [self._broken_row(9)]
+    def test_broken_row_is_logged(self):
+        # 捨てた事実はログに残す（§6 エラーを握り潰さない）。件数だけを出し、
+        # タスク名や時刻は載せない（利用者の予定内容をログへ写さないため）
         with self.assertLogs("reminder.timeline", level="WARNING") as captured:
-            scheduled_rows(broken)
-        self.assertEqual(len(captured.records), 1)  # 初回は warning が 1 件だけ出る
-        # 欠落が続いている間は warning を出さない（debug へ落とす）
-        with self.assertNoLogs("reminder.timeline", level="WARNING"):
-            scheduled_rows(broken)
-
-    def test_warns_again_after_recovery(self):
-        # 欠落が解消したら抑制を解き、次に起きた欠落を再び warning で知らせる
-        # （PlannerApp._tick が成功時に _tick_error_logged を戻すのと同じ規約）
-        broken = [self._broken_row(9)]
-        with self.assertLogs("reminder.timeline", level="WARNING"):
-            scheduled_rows(broken)
-        scheduled_rows([self._row(9, "朝会")])  # 正常な呼び出しで抑制フラグが戻る
-        with self.assertLogs("reminder.timeline", level="WARNING") as captured:
-            scheduled_rows(broken)
-        self.assertEqual(len(captured.records), 1)
+            scheduled_rows([self._broken_row(9), self._broken_row(11)])
+        self.assertEqual(len(captured.records), 1)  # 1 回の呼び出しにつきまとめて 1 行
+        self.assertIn("2", captured.records[0].getMessage())  # 捨てた件数が含まれる
 
     def test_valid_rows_do_not_warn(self):
         # 正常な行だけのときは警告を出さない（ログのノイズで本物の異常を埋もれさせない）
         with self.assertNoLogs("reminder.timeline", level="WARNING"):
             self.assertEqual(len(scheduled_rows([self._row(9, "朝会")])), 1)
 
-    def test_is_hashable(self):
+    def test_is_hashable_by_identity(self):
         # frozen dataclass なので mypy は hashable とみなす。実行時もそうであることを固定する
-        # （Task が可変 dataclass のため、自動生成ハッシュのままだと TypeError になる）。
-        # これが崩れると set(entries) や {entry: lane} が型検査を素通りして実行時に落ちる
+        # （可変な Task を含むため、自動生成ハッシュのままだと実行時に TypeError になり、
+        #  set(entries) や {entry: lane} が型検査を素通りして落ちる）。
+        # eq=False により比較・ハッシュとも同一性ベースなので、辞書へ入れた後に
+        # タスクが変化しても同じオブジェクトで引き続けられる
         entries = scheduled_rows([self._row(9, "朝会"), self._row(11, "昼会")])
         self.assertEqual(len(set(entries)), 2)
-        # 同じ内容なら等しく、ハッシュも一致する（__eq__ と __hash__ の整合）
-        again = scheduled_rows([self._row(9, "朝会")])[0]
-        same = scheduled_rows([self._row(9, "朝会")])[0]
-        self.assertNotEqual(again, same)  # Task の id（uuid）が別なので値としては別物
-        self.assertEqual(again, again)
-        self.assertEqual(hash(again), hash(again))
+        first = entries[0]
+        by_entry = {e: i for i, e in enumerate(entries)}
+        first.task.completed = True  # 辞書へ入れた後にタスクを書き換えても
+        self.assertEqual(by_entry[first], 0)  # 同じオブジェクトなら引けたままであること
 
 
 if __name__ == "__main__":
