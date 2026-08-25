@@ -53,6 +53,17 @@ class AppTestCase(unittest.TestCase):
         self.addCleanup(p.stop)
         return mock
 
+    # PlannerApp.__init__ が「開始時刻欄の自動補完値」を決めるときに見る時刻。
+    # 実時計のままだと _auto_start_default が実行時刻しだいで変わり、テストが
+    # 開始時刻を明示設定したときにその値とたまたま一致して、
+    # _refresh_stale_start_default() が「ユーザーは触っていない」と誤判定する
+    # （＝時間帯によってだけ落ちるテストになる。実測で 08:55〜08:59 の 5 分間）。
+    # 構築時だけこの固定値を見せて、自動補完値を実行時刻から切り離す。
+    # 03:33 を選ぶ理由: 既定値は _default_start により 03:35 になり、
+    # どのテストが設定する開始時刻とも衝突しない（衝突しても実行時刻には依存しないので、
+    # 落ちるなら常に落ちて原因がすぐ分かる）。
+    _INIT_NOW = datetime.datetime(2026, 6, 1, 3, 33)
+
     def _app(self, tasks=None, prefs=None):
         root = Mock()
         root.after.return_value = "job-1"
@@ -60,6 +71,7 @@ class AppTestCase(unittest.TestCase):
              patch.object(PlannerApp, "_refresh"), \
              patch.object(PlannerApp, "_schedule_all"), \
              patch.object(PlannerApp, "_schedule_periodic_refresh"), \
+             patch.object(PlannerApp, "_get_now", return_value=self._INIT_NOW), \
              patch("reminder.app.load_tasks", return_value=list(tasks or [])), \
              patch("reminder.app.load_prefs", return_value=prefs or Prefs()), \
              patch("reminder.app.tk.StringVar", side_effect=lambda value="": _DummyVar(value)):
@@ -71,16 +83,14 @@ class AppTestCase(unittest.TestCase):
         app.backlog_tree.selection.return_value = ()
         app.backlog_tree.get_children.return_value = ()
         app.status_var = _DummyVar()
-        # PlannerApp.__init__ は実時計を見て「開始時刻欄の自動補完値」を決めるため、
-        # _auto_start_default が実行時刻しだいで変わる。テストが開始時刻を明示設定したとき、
-        # その値がたまたま実行時刻の既定値と一致すると _refresh_stale_start_default() が
-        # 「ユーザーは触っていない」と誤判定して入力値を上書きし、時間帯によってだけ
-        # 落ちるテストになる（例: 実時刻 08:55〜08:59 に走らせると既定値が 09:00 になり、
-        # "09:00" を設定するテストが 5 分間だけ落ちる）。
-        # ここで「_default_start が絶対に返さない値」へ倒し、明示設定は常に
-        # 「ユーザーが編集した」と見なされるようにして、実行時刻への依存を断つ。
-        # 自動補完の挙動そのものを検証するテストは、この値を自分で設定し直す。
-        app._auto_start_default = (-1, -1)
+        # 構築後は _get_now のパッチが外れ、本物のメソッドに戻る。テストが
+        # app._get_now を差し替えれば従来どおりその時刻が使われ、差し替えなければ
+        # 実時計に戻る（既存テストの前提を変えない）。
+        # _auto_start_default と入力欄の初期値だけが _INIT_NOW 由来で決定的になるため、
+        # 「ユーザーが触ったか」の判定が実行時刻に左右されなくなる。
+        # なお自動補完そのものの経路（_refresh_stale_start_default）は無効化していない:
+        # 開始時刻を設定しないテストでも、差し替えた _get_now を基準に既定値が
+        # 計算し直されるので、実時計を読みに行くことはない。
         return app, root
 
 
@@ -801,21 +811,24 @@ class CalendarRenderTests(AppTestCase):
         # 既存の重なりテストは最低高さへクランプされる短時間タスクしか使っておらず
         # （visual_end が次の開始を越えるため）この違いを見分けられないので、
         # クランプの影響を受けない実所要 30 分の隣接ペアで境界を固定する。
-        base = datetime.datetime(2026, 6, 6, 9, 0)
-        entries = []
-        for i, title in enumerate(("前半", "後半")):
-            start = base + datetime.timedelta(minutes=30 * i)  # 9:00-9:30 と 9:30-10:00（隙間ゼロ）
-            entries.append(ScheduledRow(
-                start=start,
-                end=start + datetime.timedelta(minutes=30),
-                status=STATUS_UPCOMING,
-                task=Task(title=title, due=_iso(start), duration_min=30),
-            ))
-        # 本番と同じ最低高さ換算（CAL_MIN_BLOCK_HEIGHT / (HOUR_HEIGHT/60) = 24 分）を渡す
-        min_visual_minutes = theme.CAL_MIN_BLOCK_HEIGHT / (theme.HOUR_HEIGHT / 60.0)
-        lanes = PlannerApp._assign_lanes(entries, min_visual_minutes)
-        # 隣接しているだけで重なっていないので、2 件とも同じレーン 0 に乗る
-        self.assertEqual(sorted(lanes.values()), [0, 0])
+        # 最低高さ→分の換算式（CAL_MIN_BLOCK_HEIGHT / (HOUR_HEIGHT/60)）はテスト側へ
+        # 書き写さず、_render_timeline を実際に走らせて本番の値を使わせる。
+        # 書き写すと、本番の換算だけを変えたときにテストが古い値を渡し続けて
+        # 緑のまま通り、実際のカードは半幅に割れる（§6 の一元管理）。
+        today = datetime.date.today()
+        base = datetime.datetime.combine(today, datetime.time(9, 0))
+        tasks = [
+            Task(title="前半", due=_iso(base), duration_min=30),                                    # 9:00-9:30
+            Task(title="後半", due=_iso(base + datetime.timedelta(minutes=30)), duration_min=30),   # 9:30-10:00（隙間ゼロ）
+        ]
+        app, _ = self._app(tasks)
+        app._render_timeline(today)
+        blocks = {b[5]: b for b in app._tl_blocks}  # task.id をキーにブロック矩形を引けるようにする
+        x0_a, _y0_a, x1_a, _y1_a, _cb_a, _id_a, _done_a = blocks[tasks[0].id]
+        x0_b, _y0_b, x1_b, _y1_b, _cb_b, _id_b, _done_b = blocks[tasks[1].id]
+        # 隣接しているだけで重なっていないので、2 件とも同じレーン＝同じ x 範囲に全幅で描かれる
+        self.assertAlmostEqual(x0_a, x0_b)
+        self.assertAlmostEqual(x1_a, x1_b)
 
     def test_short_consecutive_tasks_do_not_visually_overlap(self):
         # 所要時間が短いタスク（描画時に theme.CAL_MIN_BLOCK_HEIGHT へクランプされる）が
