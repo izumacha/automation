@@ -89,6 +89,7 @@ from .timeline import (
 
 _WEEKDAY_JA = ("月", "火", "水", "木", "金", "土", "日")
 
+
 class _TimelineBlock(NamedTuple):
     """クリック判定用に 1 ブロックぶん控える情報。
 
@@ -1050,18 +1051,18 @@ class PlannerApp:
         """
         cv = self.timeline_tree  # クリックされたカレンダー Canvas を取得する
         x, y = cv.canvasx(event.x), cv.canvasy(event.y)  # クリック座標をスクロール込みの Canvas 座標に変換する
-        for x0, y0, x1, y1, cb_box, task_id, done in reversed(self._tl_blocks):  # 最前面（後ろに描かれた）ブロックから順に当たり判定をする
-            cbx0, cby0, cbx1, cby1 = cb_box  # チェックボックスの判定領域を取り出す
+        for block in reversed(self._tl_blocks):  # 最前面（後ろに描かれた）ブロックから順に当たり判定をする
+            cbx0, cby0, cbx1, cby1 = block.cb_box  # チェックボックスの判定領域を取り出す
             in_checkbox = cbx0 <= x <= cbx1 and cby0 <= y <= cby1  # クリック位置がチェックボックス内かどうかを判定する
-            in_block = x0 <= x <= x1 and y0 <= y <= y1  # クリック位置がカードブロック内かどうかを判定する
+            in_block = block.x0 <= x <= block.x1 and block.y0 <= y <= block.y1  # クリック位置がカードブロック内かどうかを判定する
             # チェックボックスは（狭いレーンでカード幅をはみ出しても）独立に判定する。
             if not in_checkbox and not in_block:  # チェックボックスにもカードにも当たらなければ
                 continue  # 次のブロックを確認する
-            if not done and in_checkbox:  # 未完了タスクのチェックボックスがクリックされたなら
-                self._tl_selected = task_id  # そのタスクを選択状態にする
-                self._complete(self._find(task_id))  # 内部で再描画される
+            if not block.done and in_checkbox:  # 未完了タスクのチェックボックスがクリックされたなら
+                self._tl_selected = block.task_id  # そのタスクを選択状態にする
+                self._complete(self._find(block.task_id))  # 内部で再描画される
             else:  # カード本体（または完了済みチェックボックス）がクリックされたなら
-                self._tl_selected = None if task_id == self._tl_selected else task_id  # 同じタスクを再クリックで選択解除、別タスクなら選択する
+                self._tl_selected = None if block.task_id == self._tl_selected else block.task_id  # 同じタスクを再クリックで選択解除、別タスクなら選択する
                 self._refresh()  # 選択状態の変化をカレンダーに反映する
             return  # 最前面のブロックを処理したら終了する（後ろのブロックは処理しない）
         if self._tl_selected is not None:  # 余白クリックで選択解除

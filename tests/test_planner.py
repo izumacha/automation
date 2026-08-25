@@ -733,8 +733,8 @@ class CalendarRenderTests(AppTestCase):
         app._tl_width = theme.CAL_GUTTER + 80  # 描画幅を最小幅に固定して最悪条件を再現する
         app._render_timeline(today)
         self.assertEqual(len(app._tl_blocks), len(tasks))  # 全タスクが描画される（欠落しない）
-        for x0, _y0, x1, _y1, _cb, _tid, _done in app._tl_blocks:  # 各ブロックの矩形を検査する
-            self.assertGreater(x1, x0)  # ブロック幅は常に正（反転・ゼロ幅で消えない）
+        for block in app._tl_blocks:  # 各ブロックの矩形を検査する
+            self.assertGreater(block.x1, block.x0)  # ブロック幅は常に正（反転・ゼロ幅で消えない）
 
     def test_checkbox_stays_within_own_block_when_lanes_are_narrow(self):
         # 回帰テスト: チェックボックスの中心 x はストライプ右隣の固定オフセットで
@@ -756,11 +756,11 @@ class CalendarRenderTests(AppTestCase):
         app._render_timeline(today)
         self.assertEqual(len(app._tl_blocks), len(tasks))  # 全タスクが描画される（欠落しない）
         block_x1 = {}  # task.id → ブロック右端(x1) の対応表（後段のテキスト位置検証で使う）
-        for x0, _y0, x1, _y1, cb_box, tid, _done in app._tl_blocks:  # 各ブロックとそのチェックボックス領域を検査する
-            cb_left, _cb_top, cb_right, _cb_bottom = cb_box  # チェックボックスの判定領域の左右端を取り出す
-            self.assertGreaterEqual(cb_left, x0 - 1e-6)  # チェックボックスがブロック左端より内側にあること
-            self.assertLessEqual(cb_right, x1 + 1e-6)  # チェックボックスがブロック右端を超えて隣のレーンへはみ出さないこと
-            block_x1[tid] = x1  # 後段でタイトル文字の描画開始位置と突き合わせるため記録する
+        for block in app._tl_blocks:  # 各ブロックとそのチェックボックス領域を検査する
+            cb_left, _cb_top, cb_right, _cb_bottom = block.cb_box  # チェックボックスの判定領域の左右端を取り出す
+            self.assertGreaterEqual(cb_left, block.x0 - 1e-6)  # チェックボックスがブロック左端より内側にあること
+            self.assertLessEqual(cb_right, block.x1 + 1e-6)  # チェックボックスがブロック右端を超えて隣のレーンへはみ出さないこと
+            block_x1[block.task_id] = block.x1  # 後段でタイトル文字の描画開始位置と突き合わせるため記録する
         # チェックボックス位置をクランプしても、そこからさらに右へオフセットした
         # タイトル／時刻テキストの描画開始 x が自ブロックの右端(x1)を超えて隣の
         # レーン(隣のタスクのカード)へはみ出して表示されないことも確認する
@@ -788,10 +788,10 @@ class CalendarRenderTests(AppTestCase):
         app._tl_width = 460  # 既定の Canvas 幅で検証する
         app._render_timeline(today)
         self.assertEqual(len(app._tl_blocks), len(tasks))  # 全タスクが描画される（欠落しない）
-        for x0, _y0, x1, _y1, cb_box, _tid, _done in app._tl_blocks:  # 各ブロックとそのチェックボックス領域を検査する
-            cb_left, _cb_top, cb_right, _cb_bottom = cb_box  # チェックボックスの判定領域の左右端を取り出す
-            self.assertGreaterEqual(cb_left, x0 - 1e-6)  # 判定領域がブロック左端より内側にあること
-            self.assertLessEqual(cb_right, x1 + 1e-6)  # 判定領域がブロック右端を超えて隣のレーンへはみ出さないこと（誤爆防止）
+        for block in app._tl_blocks:  # 各ブロックとそのチェックボックス領域を検査する
+            cb_left, _cb_top, cb_right, _cb_bottom = block.cb_box  # チェックボックスの判定領域の左右端を取り出す
+            self.assertGreaterEqual(cb_left, block.x0 - 1e-6)  # 判定領域がブロック左端より内側にあること
+            self.assertLessEqual(cb_right, block.x1 + 1e-6)  # 判定領域がブロック右端を超えて隣のレーンへはみ出さないこと（誤爆防止）
 
     def test_assign_lanes_separates_overlaps_given_unsorted_input(self):
         # _assign_lanes は「開始時刻の昇順で処理する」前提のスイープライン方式。
@@ -950,7 +950,7 @@ class CalendarRenderTests(AppTestCase):
         app._render_timeline(today)
         blocks = [b for b in app._tl_blocks if b.task_id == task.id]
         self.assertTrue(blocks)
-        cb = blocks[0][4]
+        cb = blocks[0].cb_box  # クリック判定用のチェックボックス領域を名前で取り出す
         ev = Mock()
         ev.x = (cb[0] + cb[2]) / 2
         ev.y = (cb[1] + cb[3]) / 2

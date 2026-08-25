@@ -166,9 +166,17 @@ def scheduled_rows(rows: list[TimelineRow]) -> list[ScheduledRow]:
     if dropped:  # 1 件でも捨てていたら、その事実を記録に残す（§6 エラーを握り潰さない）
         # 件数だけを出し、タスク名や時刻は載せない（利用者の予定内容をログへ写さないため）。
         # 再描画のたびに呼ばれる関数なので、この状態に陥れば同じ警告が繰り返し出る。
-        # 初回だけ warning に落とす抑制は入れない: この分岐はそもそも到達不能で
-        # （build_day_timeline が唯一の生成元で、ROW_TASK には必ず task を渡す）、
-        # 到達したときは build_day_timeline 側が壊れている＝繰り返し鳴ってほしい状況。
+        # 初回だけ warning に落とす抑制は、次の 2 つの理由で入れていない:
+        #   1. このパッケージ内から到達する経路は無い。build_day_timeline が
+        #      TimelineRow の唯一の生成元で、ROW_TASK には必ず task を渡すため、
+        #      アプリ内で鳴るときは build_day_timeline 側が壊れている＝繰り返し
+        #      鳴ってほしい状況になる。
+        #   2. TimelineRow と scheduled_rows は公開 API なので、外部の呼び出し元
+        #      （CLAUDE.md §10 が想定する Web/スマホ版）が task=None の ROW_TASK 行を
+        #      自分で組み立てて渡せば到達しうる。ただしそれは契約違反の入力であり、
+        #      呼び出しごとに知らせるのが正しい。うるさければ、このモジュールの
+        #      名前付きロガー（reminder.timeline）のレベルを呼び出し側で下げられる
+        #      — ルートロガーではなく名前付きにしてある理由の 1 つがこれ。
         # 抑制のためにモジュール変数を持つと、純粋関数として保つと決めているこのモジュール
         # （CLAUDE.md §3 / 付録 B）に唯一の可変状態が入り、呼び出し順で結果が変わってしまう
         logger.warning("タスク行に Task がありません。%d 件を表示から除外しました。", dropped)
