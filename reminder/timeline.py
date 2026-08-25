@@ -16,6 +16,16 @@ from .task import ISO_FMT, Task
 # このモジュールのログ出力先（想定外の行を捨てたことを記録するために使う）
 logger = logging.getLogger(__name__)
 
+# scheduled_rows が「タスク行なのに Task が無い」行を捨てたことを、既に warning で報せたか。
+# scheduled_rows は再描画のたびに呼ばれる（既定 60 秒周期の定期更新に加え、ウィンドウを
+# ドラッグしている間は幅が動くたび）ため、毎回 warning を出すと同じ 1 行でログが埋まり、
+# 残したかった「予定が消えた手がかり」を自分のノイズで潰してしまう。PlannerApp._tick の
+# _tick_error_logged と同じ方式で、初回だけ warning・以降は debug に落とし、欠落が
+# 解消した呼び出しでフラグを戻す。
+# 純粋関数の集まりであるこのモジュールに唯一置く可変状態なので、ここに集約して意図を明記する
+# （テストは reminder.timeline._dropped_row_warned を setUp で False に戻して独立させる）。
+_dropped_row_warned = False
+
 # タイムライン行の種別
 ROW_TASK = "task"
 ROW_FREE = "free"
@@ -96,13 +106,6 @@ class ScheduledRow:
     作れてしまう。``scheduled_rows`` だけが生成経路である以上その組み方は現れないが、
     そもそも表現できない形にしておく方が安全（§9 fail-safe）。
 
-    注意（ハッシュ不可）: ``Task`` は ``carry_over_overdue`` が ``due`` を書き換える
-    可変 dataclass なので、値としてハッシュできない。よって本クラスも
-    ``frozen=True`` だが実行時は unhashable で、``set(entries)`` や ``{entry: ...}``
-    は ``TypeError`` になる（mypy は frozen dataclass を hashable とみなすため
-    **型検査は素通りし、実行時にだけ落ちる**）。並びをキーで引きたいときは
-    ``entry.task.id`` を使う（``PlannerApp._assign_lanes`` が実際そうしている）。
-
     将来案: 根本原因は ``TimelineRow`` が ``kind`` の値で意味の変わる弱い型である
     こと自体で、本クラスはその上に被せた回避策にすぎない。``rows`` を直接なめる
     他の消費者（``free_minutes_today`` / ``max_free_slot``、CLAUDE.md §10 が想定する
@@ -118,6 +121,24 @@ class ScheduledRow:
     end: datetime.datetime  # タスクの終了日時（開始 + 所要時間）
     status: str  # タスク行の状態（STATUS_DONE / NOW / PAST / UPCOMING）
     task: Task  # その行が指すタスク（None にはならない）
+
+    def __hash__(self) -> int:
+        """自動生成のハッシュを、Task の同一性キー（id）を使う形へ差し替える。
+
+        ``frozen=True`` の dataclass が自動生成するハッシュは全フィールドを
+        ``hash()`` に掛けるが、``Task`` は ``carry_over_overdue`` が ``due`` を
+        書き換える可変 dataclass なので値としてハッシュできず、``TypeError`` になる。
+        一方 **mypy は frozen dataclass を hashable とみなす**ため、
+        ``set(entries)`` や ``{entry: lane}`` と書いても型検査は素通りし、
+        実行時にだけ落ちる — 型と実行時が食い違う、この PR が潰そうとしている
+        まさにその形の穴になってしまう。
+
+        ``Task`` の同一性は不変な ``id``（uuid）で決まるので、これを使えば
+        実行時にもハッシュでき、``__eq__``（全フィールド比較）との整合も保てる
+        （``Task`` が等しければ ``id`` も等しいため、等しい値は必ず同じハッシュになる）。
+        """
+        # 可変な Task 本体ではなく、不変な id を使ってハッシュを組み立てる
+        return hash((self.start, self.end, self.status, self.task.id))
 
 
 def scheduled_rows(rows: list[TimelineRow]) -> list[ScheduledRow]:
@@ -140,16 +161,29 @@ def scheduled_rows(rows: list[TimelineRow]) -> list[ScheduledRow]:
     Returns:
         タスク行のビューのリスト（入力の並び順を保つ）。
     """
+    global _dropped_row_warned  # 「既に警告済みか」の目印を更新するため参照する
     entries: list[ScheduledRow] = []  # 組み直した結果を溜めるリストを初期化する
+    dropped = 0  # この呼び出しで捨てたタスク行の件数を数える
     for row in rows:  # タイムライン行を先頭から順に見る（並び順をそのまま保つ）
         if row.kind != ROW_TASK:  # 空き時間行は対象外なので
             continue  # 何もせず次の行へ進む
         if row.task is None:  # タスク行なのに Task が欠けている（本来ありえない）場合
-            # 予定が黙って画面から消えるのを防ぐため、捨てたこと自体は記録に残す
-            logger.warning("タスク行に Task がありません。この行は表示から除外します: start=%s", row.start)
+            dropped += 1  # 捨てた件数を 1 増やす（ログの出し方は走査後にまとめて決める）
             continue  # 描画側へ None を渡さないようこの行は落とす
         # ここまで来れば row.task は Task 型に確定しているので、必要な値を写し取る
         entries.append(ScheduledRow(start=row.start, end=row.end, status=row.status, task=row.task))
+
+    if dropped:  # 1 件でも捨てていたら、その事実を記録に残す（§6 エラーを握り潰さない）
+        # 件数だけを出し、タスク名や時刻は載せない（利用者の予定内容をログへ写さないため）
+        message = "タスク行に Task がありません。%d 件を表示から除外しました。"
+        if not _dropped_row_warned:  # 前回のきれいな呼び出し以降で最初の欠落なら
+            _dropped_row_warned = True  # 以降の連続する欠落を debug に落とすため目印を立てる
+            logger.warning(message, dropped)  # 初回は利用者に見える warning で残す
+        else:  # 直前の呼び出しから欠落が続いているなら
+            logger.debug(message, dropped)  # ログ溢れを防ぐため 2 回目以降は debug に落とす
+    else:  # 捨てた行が 1 件も無かったなら
+        _dropped_row_warned = False  # 欠落が解消したので、次の発生を再び warning で知らせられるよう戻す
+
     return entries  # 入力順を保ったタスク行ビューのリストを返す
 
 

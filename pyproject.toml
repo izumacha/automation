@@ -113,6 +113,15 @@ platform = "linux"
 # 下の overrides に理由付きで明示する必要が生じる（fail-closed）。
 files = ["reminder"]
 warn_unused_ignores = true       # 不要になった # type: ignore を検出して腐敗を防ぐ
+# 注釈が 1 つも無い関数の「中身」も検査する。mypy の既定は、引数にも戻り値にも注釈が無い
+# 関数の本体を丸ごと飛ばす（＝中に型エラーを書いても素通りする）。
+# 現時点で reminder/ にそういう関数は無い（app.py の _on_timeline_resize /
+# _on_timeline_click / _rounded_rect や __init__.py の __getattr__ は引数か戻り値の
+# どちらかに注釈があるため、既定でも本体は検査されている。実測で確認済み）。
+# つまりこの設定は今の検出結果を変えないが、`def f(a, b):` を新しく足したときに
+# その本体が無警告で検査対象外になるのを防ぐ fail-closed の保険として有効にしておく
+# （検査対象をモジュール単位で fail-closed にしている denylist 方式と同じ考え方）。
+check_untyped_defs = true
 warn_redundant_casts = true      # 意味のない cast() を検出
 no_implicit_optional = true      # 既定値 None の引数に暗黙の Optional を付けない（明示を強制）
 # 注: ignore_missing_imports はグローバルには有効にしない。全体に効かせると、

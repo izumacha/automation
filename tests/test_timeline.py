@@ -2,6 +2,7 @@
 import datetime
 import unittest
 
+from reminder import timeline
 from reminder.task import Task
 from reminder.timeline import (
     ROW_FREE,
@@ -501,12 +502,23 @@ class ScheduledRowTests(unittest.TestCase):
     「何を残し・何を落とすか」と「入力の並び順を保つか」をここで固定する。
     """
 
+    def setUp(self):
+        # scheduled_rows は「初回だけ warning・以降は debug」の抑制フラグをモジュール変数で
+        # 持つため、テスト間で状態が漏れないよう毎回リセットして独立させる
+        timeline._dropped_row_warned = False
+
     @staticmethod
     def _row(hour, title):
         """指定時刻に始まる 30 分のタスク行を 1 件組み立てる（並び順検証用）。"""
         start = datetime.datetime(2026, 6, 6, hour, 0)
         task = _t(title, start.strftime("%Y-%m-%dT%H:%M:%S"), 30)
         return TimelineRow(ROW_TASK, start, start + datetime.timedelta(minutes=30), 30, task=task)
+
+    @staticmethod
+    def _broken_row(hour):
+        """task が欠けたタスク行（本来ありえない形）を 1 件組み立てる。"""
+        start = datetime.datetime(2026, 6, 6, hour, 0)
+        return TimelineRow(ROW_TASK, start, start + datetime.timedelta(minutes=30), 30, task=None)
 
     def test_keeps_only_task_rows(self):
         # 空き時間行を挟んだタスク行が、タスクと状態込みで返ることを確かめる
@@ -543,21 +555,55 @@ class ScheduledRowTests(unittest.TestCase):
         self.assertTrue(any(r.kind == ROW_FREE for r in rows))
         self.assertEqual(scheduled_rows(rows), [])
 
-    def test_drops_task_row_without_task_and_warns(self):
-        # task が欠けたタスク行は安全側に倒して除外する（描画側で None を掴ませない）。
-        # ただし黙って捨てると予定が画面から消えた手がかりが残らないので警告ログを出す。
-        # 通常の build_day_timeline はこの形の行を作らないので直接組み立てて検証する
-        moment = datetime.datetime(2026, 6, 6, 9, 0)
-        broken = TimelineRow(ROW_TASK, moment, moment + datetime.timedelta(minutes=30), 30, task=None)
+    def test_drops_only_the_broken_row_and_keeps_the_rest(self):
+        # task が欠けたタスク行は安全側に倒して除外する（描画側で None を掴ませない）が、
+        # 落とすのはその 1 行だけで、後続の正常な行は残さなければならない。
+        # 壊れた行を 1 件だけ渡すテストだと continue を break に取り違えても戻り値が
+        # 同じ [] になって通ってしまうため、正常行で挟んだ入力で固定する
+        # （break 化すると「壊れた行より後ろの予定が全部消える」＝その日の大半が消える）
+        rows = [self._row(9, "朝会"), self._broken_row(11), self._row(15, "夕会")]
+        entries = scheduled_rows(rows)
+        self.assertEqual([e.task.title for e in entries], ["朝会", "夕会"])
+
+    def test_broken_row_warns_once_then_falls_back_to_debug(self):
+        # 捨てた事実はログに残す（§6 エラーを握り潰さない）。ただし scheduled_rows は
+        # 再描画のたびに呼ばれるので、連続する欠落は初回だけ warning にしてログ溢れを防ぐ
+        broken = [self._broken_row(9)]
         with self.assertLogs("reminder.timeline", level="WARNING") as captured:
-            self.assertEqual(scheduled_rows([broken]), [])
-        # 捨てた事実がログに残っていることを確かめる（§6 エラーを握り潰さない）
+            scheduled_rows(broken)
+        self.assertEqual(len(captured.records), 1)  # 初回は warning が 1 件だけ出る
+        # 欠落が続いている間は warning を出さない（debug へ落とす）
+        with self.assertNoLogs("reminder.timeline", level="WARNING"):
+            scheduled_rows(broken)
+
+    def test_warns_again_after_recovery(self):
+        # 欠落が解消したら抑制を解き、次に起きた欠落を再び warning で知らせる
+        # （PlannerApp._tick が成功時に _tick_error_logged を戻すのと同じ規約）
+        broken = [self._broken_row(9)]
+        with self.assertLogs("reminder.timeline", level="WARNING"):
+            scheduled_rows(broken)
+        scheduled_rows([self._row(9, "朝会")])  # 正常な呼び出しで抑制フラグが戻る
+        with self.assertLogs("reminder.timeline", level="WARNING") as captured:
+            scheduled_rows(broken)
         self.assertEqual(len(captured.records), 1)
 
     def test_valid_rows_do_not_warn(self):
         # 正常な行だけのときは警告を出さない（ログのノイズで本物の異常を埋もれさせない）
         with self.assertNoLogs("reminder.timeline", level="WARNING"):
             self.assertEqual(len(scheduled_rows([self._row(9, "朝会")])), 1)
+
+    def test_is_hashable(self):
+        # frozen dataclass なので mypy は hashable とみなす。実行時もそうであることを固定する
+        # （Task が可変 dataclass のため、自動生成ハッシュのままだと TypeError になる）。
+        # これが崩れると set(entries) や {entry: lane} が型検査を素通りして実行時に落ちる
+        entries = scheduled_rows([self._row(9, "朝会"), self._row(11, "昼会")])
+        self.assertEqual(len(set(entries)), 2)
+        # 同じ内容なら等しく、ハッシュも一致する（__eq__ と __hash__ の整合）
+        again = scheduled_rows([self._row(9, "朝会")])[0]
+        same = scheduled_rows([self._row(9, "朝会")])[0]
+        self.assertNotEqual(again, same)  # Task の id（uuid）が別なので値としては別物
+        self.assertEqual(again, again)
+        self.assertEqual(hash(again), hash(again))
 
 
 if __name__ == "__main__":

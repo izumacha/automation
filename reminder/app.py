@@ -842,8 +842,12 @@ class PlannerApp:
         active: list[tuple[datetime.datetime, int]] = []  # 現在進行中のタスクリストを初期化する
         for entry in sorted(task_rows, key=lambda e: e.start):  # タスクを開始時刻の早い順に処理する
             visual_end = max(entry.end, entry.start + min_gap)  # 実終了時刻と最低高さ換算の終了時刻の遅い方を「見た目の終了」とする
-            used = {lane for end, lane in active if end > entry.start}  # このタスクと見た目上重なっているレーン番号の集合を取得する
+            # 先に「見た目上まだ終わっていない」ものだけを残し、その lane 集合をそのまま
+            # 使用中レーンとして扱う。以前は同じ条件（end > entry.start）を used 用と
+            # active 用に 2 回書いており、片方だけ条件を直すと used と active が食い違って
+            # レーン割り当てが静かに崩れる（重なるカードが同じレーンに乗る／不要にレーンが増える）
             active = [(end, lane) for end, lane in active if end > entry.start]  # 見た目上終了済みのタスクをアクティブリストから除去する
+            used = {lane for _, lane in active}  # 残ったもの＝このタスクと見た目上重なっているレーン番号の集合
             lane = 0  # 最小のレーン番号 0 から探す
             while lane in used:  # そのレーンが使用中なら
                 lane += 1  # 次のレーン番号を試す
