@@ -119,19 +119,10 @@ no_implicit_optional = true      # 既定値 None の引数に暗黙の Optional
 #     将来スタブが要る依存を足したときに「型が付いていない」ことを黙って握り潰すため。
 #     スタブが無い依存は下の overrides でモジュール単位に限定して許可する。
 
-# 注: かつてここに `reminder.app` を ignore_errors で外す overrides があった（16 件の
-#     エラーが出るため）。その 16 件は timeline.ScheduledRow の導入で解消済みなので、
-#     overrides ごと削除して app.py も検査対象へ戻した。denylist は現在 cairosvg の
-#     import 解決のみで、reminder/ の全モジュールが型検査を受ける。
-#
-#     当時のコメントは内訳を「15 件は自分で直せる / 1 件は tkinter スタブ由来の偽陽性で
-#     上流の typeshed が直らない限り消せない」と書いていたが、**この切り分けは誤りだった**。
-#     偽陽性とされた 1 件（app.py の create_text が overload に合わない）は、同じ行の
-#     `tags=("task", task.id)` の task が Task | None だったせいで task.id が `str | Any`
-#     に落ち、tags が `tuple[str, str | Any]` になって overload 解決に失敗していたもの。
-#     つまり残り 15 件と同じ根本原因のとばっちりで、根本を直した時点で一緒に消えた。
-#     結果として `disable_error_code` も `# type: ignore` も 1 つも要らなかった。
-#     （最小再現: Task | None の属性を tags に渡すと同じ call-overload が出る）
+# 注: 自リポジトリのモジュールに除外は無い（reminder/ は app.py を含め全モジュールが対象）。
+#     下の cairosvg が唯一の overrides で、これは import 解決の許可であって
+#     エラーの無視ではない。**モジュールを ignore_errors で外すのは最後の手段**とし、
+#     まず型で不変条件を表せないかを検討する（実例と経緯は CLAUDE.md §2 に集約）。
 
 # cairosvg は型スタブを提供していないオプション依存で、quality ジョブでは
 # インストールもされない（requirements-dev.txt に無い）。この 1 モジュールに限って

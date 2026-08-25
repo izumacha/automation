@@ -778,7 +778,7 @@ class PlannerApp:
 
         # 描画時に最低高さ（theme.CAL_MIN_BLOCK_HEIGHT px）へクランプされる極端に
         # 短いタスクは、実際の終了時刻より見た目上は長く描かれる。レーン割り当てが
-        # 実時間（row.end）だけで重なりを判定すると、クランプ分だけ隣のタスクと
+        # 実時間（entry.end）だけで重なりを判定すると、クランプ分だけ隣のタスクと
         # 視覚的に重なってしまうため、最低高さを分に換算した「見た目の占有時間」を
         # 加味してレーンを分ける。
         min_visual_minutes = theme.CAL_MIN_BLOCK_HEIGHT / scale  # 最低高さ（px）を「分」に換算する
@@ -836,12 +836,14 @@ class PlannerApp:
         """
         lanes: dict[str, int] = {}  # タスク ID → レーン番号の対応辞書を初期化する
         min_gap = datetime.timedelta(minutes=min_visual_minutes)  # 最低高さを timedelta に変換する
-        active: list[tuple] = []  # (見た目の終了 datetime, lane) 現在進行中のタスクリストを初期化する
-        for entry in sorted(task_rows, key=lambda e: e.row.start):  # タスクを開始時刻の早い順に処理する
-            row = entry.row  # 開始・終了時刻を読むために元のタイムライン行を取り出す
-            visual_end = max(row.end, row.start + min_gap)  # 実終了時刻と最低高さ換算の終了時刻の遅い方を「見た目の終了」とする
-            used = {lane for end, lane in active if end > row.start}  # このタスクと見た目上重なっているレーン番号の集合を取得する
-            active = [(end, lane) for end, lane in active if end > row.start]  # 見た目上終了済みのタスクをアクティブリストから除去する
+        # (見た目の終了 datetime, lane) の並び。要素の型を書いておかないと tuple[Any, ...] に
+        # なり、下の `end > entry.start`（datetime 同士の比較）が型検査を素通りしてしまう
+        # ＝ append の順序を入れ替える取り違えを mypy が捕まえられない
+        active: list[tuple[datetime.datetime, int]] = []  # 現在進行中のタスクリストを初期化する
+        for entry in sorted(task_rows, key=lambda e: e.start):  # タスクを開始時刻の早い順に処理する
+            visual_end = max(entry.end, entry.start + min_gap)  # 実終了時刻と最低高さ換算の終了時刻の遅い方を「見た目の終了」とする
+            used = {lane for end, lane in active if end > entry.start}  # このタスクと見た目上重なっているレーン番号の集合を取得する
+            active = [(end, lane) for end, lane in active if end > entry.start]  # 見た目上終了済みのタスクをアクティブリストから除去する
             lane = 0  # 最小のレーン番号 0 から探す
             while lane in used:  # そのレーンが使用中なら
                 lane += 1  # 次のレーン番号を試す
@@ -857,17 +859,16 @@ class PlannerApp:
         左端にカテゴリ色のストライプ、その右に丸いチェックボックス（完了は ✓ 入り）、
         さらに右にタイトルと時刻を置く。クリック判定用の座標を記録する。
         """
-        row = entry.row  # 開始・終了時刻や状態を読むために元のタイムライン行を取り出す
         task = entry.task  # このブロックに対応するタスクオブジェクトを取得する
-        y0 = y_of(row.start)  # タスク開始時刻の y 座標を計算する
-        y1 = max(y_of(row.end), y0 + theme.CAL_MIN_BLOCK_HEIGHT)  # 最低限の高さを確保（レーン割り当てもこの値を共有する）
+        y0 = y_of(entry.start)  # タスク開始時刻の y 座標を計算する
+        y1 = max(y_of(entry.end), y0 + theme.CAL_MIN_BLOCK_HEIGHT)  # 最低限の高さを確保（レーン割り当てもこの値を共有する）
         # レーンが狭いと固定隙間 CAL_BLOCK_GAP では幅が負になり消えるため、
         # 隙間はレーン幅の一定割合までに抑えてブロック幅を必ず正に保つ。
         gap = min(theme.CAL_BLOCK_GAP, lane_w * theme.CAL_BLOCK_GAP_MAX_RATIO)  # レーン幅に応じて詰めた左右の隙間（px）
         x0 = area_left + lane * lane_w + gap  # ブロック左端の x 座標を計算する（レーン位置と隙間から）
         x1 = area_left + (lane + 1) * lane_w - gap  # ブロック右端の x 座標を計算する
 
-        fill, accent, text_color = self._block_colors(task, row.status)  # タスクの状態（完了・進行中・過去など）に応じた配色を取得する
+        fill, accent, text_color = self._block_colors(task, entry.status)  # タスクの状態（完了・進行中・過去など）に応じた配色を取得する
         is_selected = task.id == self._tl_selected  # このタスクが現在選択中かどうかを判定する
         outline = theme.BRAND_DARK if is_selected else theme.BORDER  # 選択中なら強調色、それ以外は通常の枠色を使う
         ow = theme.CAL_SELECT_OUTLINE_W if is_selected else theme.CAL_OUTLINE_W  # 選択中は枠線を太く、それ以外は細くする（太さはテーマの寸法トークン）
@@ -880,7 +881,7 @@ class PlannerApp:
                            tags=("task", task.id))  # カードの左端にカテゴリ色のストライプを描く
 
         tall = (y1 - y0) >= theme.CAL_MIN_TEXT_HEIGHT  # カードの高さがテキスト表示の最低値以上かどうかを判定する
-        done = row.status == STATUS_DONE  # このタスクが完了済みかどうかを判定する
+        done = entry.status == STATUS_DONE  # このタスクが完了済みかどうかを判定する
         # 丸いチェックボックス（未完了＝枠線のみ / 完了＝塗り＋✓）。
         r = theme.CAL_CHECK_R  # チェックボックスの半径をテーマ定数から取得する
         # チェックボックスの中心 x 座標（本来はストライプ右隣の固定オフセット）。
@@ -930,7 +931,7 @@ class PlannerApp:
             cv.create_text(text_x, y0 + theme.CAL_TITLE_PAD_TOP, anchor="nw", text=title, fill=text_color,
                            font=theme.FONT_BOLD, width=text_w, tags=("task", task.id))  # タイトルをカード上部に太字で描く
             cv.create_text(text_x, y1 - theme.CAL_TIME_PAD_BOTTOM, anchor="sw",
-                           text=f"{row.start:%H:%M}–{row.end:%H:%M}", fill=text_color,
+                           text=f"{entry.start:%H:%M}–{entry.end:%H:%M}", fill=text_color,
                            font=theme.FONT_SMALL, tags=("task", task.id))  # 開始〜終了時刻をカード下部に小さく描く
         else:  # カードが低くてテキスト 2 行分の高さがないなら
             cv.create_text(text_x, (y0 + y1) / 2, anchor="w", text=title,

@@ -495,26 +495,45 @@ class PruneCompletedTests(unittest.TestCase):
 
 
 class ScheduledRowTests(unittest.TestCase):
-    """scheduled_rows（タスク行と Task の組み直し）の単体テスト。
+    """scheduled_rows（タスク行を Task 込みのビューへ組み直す関数）の単体テスト。
 
     描画側（reminder.app）はこの関数の戻り値だけを見てカードを描くため、
-    「何を残し・何を落とすか」と「元の並び順を保つか」をここで固定する。
+    「何を残し・何を落とすか」と「入力の並び順を保つか」をここで固定する。
     """
 
-    def test_keeps_only_task_rows_in_order(self):
-        # 空き時間行を挟んだタスク行が、順番どおりに Task と対で返ることを確かめる
+    @staticmethod
+    def _row(hour, title):
+        """指定時刻に始まる 30 分のタスク行を 1 件組み立てる（並び順検証用）。"""
+        start = datetime.datetime(2026, 6, 6, hour, 0)
+        task = _t(title, start.strftime("%Y-%m-%dT%H:%M:%S"), 30)
+        return TimelineRow(ROW_TASK, start, start + datetime.timedelta(minutes=30), 30, task=task)
+
+    def test_keeps_only_task_rows(self):
+        # 空き時間行を挟んだタスク行が、タスクと状態込みで返ることを確かめる
         rows = build_day_timeline(
             [_t("朝会", "2026-06-06T09:00:00", 30), _t("資料作成", "2026-06-06T11:00:00", 60)],
             datetime.date(2026, 6, 6),
             now=datetime.datetime(2026, 6, 6, 8, 0),
         )
+        self.assertTrue(any(r.kind == ROW_FREE for r in rows))  # 入力に空き時間行が含まれている前提を確かめる
         entries = scheduled_rows(rows)
-        # 空き時間行は落ち、タスク行だけが開始時刻順に並ぶ
+        # 空き時間行は落ち、タスク行だけが残る
         self.assertEqual([e.task.title for e in entries], ["朝会", "資料作成"])
-        # 組の row 側は元のタスク行そのもの（開始時刻が一致する）
-        self.assertEqual([e.row.start.hour for e in entries], [9, 11])
-        # 全要素が ROW_TASK 由来であることを確かめる
-        self.assertTrue(all(e.row.kind == ROW_TASK for e in entries))
+        # 開始・終了・状態は元のタスク行から写されている
+        self.assertEqual([e.start.hour for e in entries], [9, 11])
+        self.assertEqual([e.end.hour for e in entries], [9, 12])
+        self.assertEqual([e.status for e in entries], [STATUS_UPCOMING, STATUS_UPCOMING])
+
+    def test_preserves_input_order_even_when_unsorted(self):
+        # 戻り値の並びは描画順 → _tl_blocks の順序 → クリック判定の「最前面優先」に
+        # 直結するため、scheduled_rows は絶対に並べ替えてはいけない。
+        # build_day_timeline は既に開始時刻順で返すので、それだけを入力にすると
+        # 実装が sorted() を挟んでもテストが通ってしまう。ここでは開始時刻が
+        # 降順になるよう手組みした入力を渡し、その順序が保たれることを固定する
+        rows = [self._row(15, "夕方"), self._row(11, "昼"), self._row(9, "朝")]
+        entries = scheduled_rows(rows)
+        self.assertEqual([e.task.title for e in entries], ["夕方", "昼", "朝"])
+        self.assertEqual([e.start.hour for e in entries], [15, 11, 9])
 
     def test_drops_free_rows(self):
         # 空き時間行しか無い（タスクが 1 件も無い）日は空リストになる
@@ -524,12 +543,21 @@ class ScheduledRowTests(unittest.TestCase):
         self.assertTrue(any(r.kind == ROW_FREE for r in rows))
         self.assertEqual(scheduled_rows(rows), [])
 
-    def test_drops_task_row_without_task(self):
+    def test_drops_task_row_without_task_and_warns(self):
         # task が欠けたタスク行は安全側に倒して除外する（描画側で None を掴ませない）。
+        # ただし黙って捨てると予定が画面から消えた手がかりが残らないので警告ログを出す。
         # 通常の build_day_timeline はこの形の行を作らないので直接組み立てて検証する
         moment = datetime.datetime(2026, 6, 6, 9, 0)
         broken = TimelineRow(ROW_TASK, moment, moment + datetime.timedelta(minutes=30), 30, task=None)
-        self.assertEqual(scheduled_rows([broken]), [])
+        with self.assertLogs("reminder.timeline", level="WARNING") as captured:
+            self.assertEqual(scheduled_rows([broken]), [])
+        # 捨てた事実がログに残っていることを確かめる（§6 エラーを握り潰さない）
+        self.assertEqual(len(captured.records), 1)
+
+    def test_valid_rows_do_not_warn(self):
+        # 正常な行だけのときは警告を出さない（ログのノイズで本物の異常を埋もれさせない）
+        with self.assertNoLogs("reminder.timeline", level="WARNING"):
+            self.assertEqual(len(scheduled_rows([self._row(9, "朝会")])), 1)
 
 
 if __name__ == "__main__":

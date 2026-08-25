@@ -8,9 +8,13 @@ Any Planner のように「1 日のタスクを時間軸で可視化」するた
 from __future__ import annotations
 
 import datetime
+import logging
 from dataclasses import dataclass
 
 from .task import ISO_FMT, Task
+
+# このモジュールのログ出力先（想定外の行を捨てたことを記録するために使う）
+logger = logging.getLogger(__name__)
 
 # タイムライン行の種別
 ROW_TASK = "task"
@@ -75,7 +79,7 @@ class TimelineRow:
 
 @dataclass(frozen=True)
 class ScheduledRow:
-    """タスク行（ROW_TASK）と、その行が指す Task を対にしたもの。
+    """タスク行（ROW_TASK）を「Task が必ずある」形で表した読み取り専用のビュー。
 
     ``TimelineRow.task`` は「空き時間行（ROW_FREE）では中身が無い」という理由で
     ``Task | None`` になっているが、``kind == ROW_TASK`` の行では必ず Task が入る。
@@ -85,32 +89,68 @@ class ScheduledRow:
     その結果、描画側は ``row.task`` を触るたびに型チェッカへ「None ではない」と
     伝え直す必要があり、実際 ``reminder.app`` は丸ごと mypy の対象外にされていた。
 
-    絞り込みの結果を「行 + None でない Task」の組として持ち直すことで、
-    不変条件を型に載せ、以降は ``task`` を常に ``Task`` として扱えるようにする。
+    元の ``TimelineRow`` を抱えずに必要な値だけを写し取るのは、**真実の源を 1 つに
+    保つため**。``row`` と ``task`` を並べて持つ形にすると ``ScheduledRow(row=A の行,
+    task=B のタスク)`` という不整合な組が型検査も実行時検査も素通りしてしまい、
+    描画側が「A の時間帯に B のカードを描く」（＝B の完了操作が誤爆する）状態を
+    作れてしまう。``scheduled_rows`` だけが生成経路である以上その組み方は現れないが、
+    そもそも表現できない形にしておく方が安全（§9 fail-safe）。
+
+    注意（ハッシュ不可）: ``Task`` は ``carry_over_overdue`` が ``due`` を書き換える
+    可変 dataclass なので、値としてハッシュできない。よって本クラスも
+    ``frozen=True`` だが実行時は unhashable で、``set(entries)`` や ``{entry: ...}``
+    は ``TypeError`` になる（mypy は frozen dataclass を hashable とみなすため
+    **型検査は素通りし、実行時にだけ落ちる**）。並びをキーで引きたいときは
+    ``entry.task.id`` を使う（``PlannerApp._assign_lanes`` が実際そうしている）。
+
+    将来案: 根本原因は ``TimelineRow`` が ``kind`` の値で意味の変わる弱い型である
+    こと自体で、本クラスはその上に被せた回避策にすぎない。``rows`` を直接なめる
+    他の消費者（``free_minutes_today`` / ``max_free_slot``、CLAUDE.md §10 が想定する
+    Web・スマホ版）には ``Task | None`` が残るため、新しい消費者が ``row.task`` を
+    触れば同じ問題が再発する。``TaskRow`` / ``FreeRow`` の 2 型 + tagged union へ
+    割るのが本筋だが、全消費者とテストに波及するため別変更として切り出す。
+
     GUI 非依存の純粋なデータ構造としてここに置き、表示層を差し替えても
     同じ絞り込みを使い回せるようにしている。
     """
 
-    row: TimelineRow  # 元のタイムライン行（開始・終了・状態などはここから読む）
+    start: datetime.datetime  # タスクの開始日時（元の TimelineRow から写す）
+    end: datetime.datetime  # タスクの終了日時（開始 + 所要時間）
+    status: str  # タスク行の状態（STATUS_DONE / NOW / PAST / UPCOMING）
     task: Task  # その行が指すタスク（None にはならない）
 
 
 def scheduled_rows(rows: list[TimelineRow]) -> list[ScheduledRow]:
-    """タイムライン行からタスク行だけを取り出し、Task と対にして返す。
+    """タイムライン行からタスク行だけを取り出し、Task 込みのビューにして返す。
 
-    空き時間行（ROW_FREE）と、万一 task が欠けたタスク行は除外する。
+    空き時間行（ROW_FREE）は当然除外し、万一 task が欠けたタスク行も除外する。
     後者を弾くのは安全側に倒すためで、描画側が None を掴んでクラッシュする代わりに
-    その 1 行だけが表示から落ちる（§9 fail-safe）。
+    その 1 行だけが表示から落ちる（§9 fail-safe）。ただし黙って捨てると、予定が
+    デイビューから消えても手がかりが何も残らない（統計・空き時間計算は別経路を
+    通るため数字だけは合ってしまい、かえって気づきにくい）ので警告ログを残す
+    （§6 エラーを握り潰さない）。
+
+    戻り値は入力の並び順をそのまま保つ。この順序は描画順 →
+    ``PlannerApp._tl_blocks`` の順序 → クリック判定の「最前面優先」に直結するため、
+    ここで並べ替えてはいけない。
 
     Args:
         rows: build_day_timeline が返したタイムライン行。
 
     Returns:
-        タスク行と Task の組のリスト（元の並び順を保つ）。
+        タスク行のビューのリスト（入力の並び順を保つ）。
     """
-    return [ScheduledRow(row=r, task=r.task)  # 行と Task を対にして持ち直す（以降 task は Task 型に確定する）
-            for r in rows
-            if r.kind == ROW_TASK and r.task is not None]  # タスク行かつ Task を持つ行だけを残す
+    entries: list[ScheduledRow] = []  # 組み直した結果を溜めるリストを初期化する
+    for row in rows:  # タイムライン行を先頭から順に見る（並び順をそのまま保つ）
+        if row.kind != ROW_TASK:  # 空き時間行は対象外なので
+            continue  # 何もせず次の行へ進む
+        if row.task is None:  # タスク行なのに Task が欠けている（本来ありえない）場合
+            # 予定が黙って画面から消えるのを防ぐため、捨てたこと自体は記録に残す
+            logger.warning("タスク行に Task がありません。この行は表示から除外します: start=%s", row.start)
+            continue  # 描画側へ None を渡さないようこの行は落とす
+        # ここまで来れば row.task は Task 型に確定しているので、必要な値を写し取る
+        entries.append(ScheduledRow(start=row.start, end=row.end, status=row.status, task=row.task))
+    return entries  # 入力順を保ったタスク行ビューのリストを返す
 
 
 def day_bounds(
