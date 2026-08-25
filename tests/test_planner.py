@@ -716,9 +716,9 @@ class CalendarRenderTests(AppTestCase):
         app._render_timeline(today)
         blocks = [b for b in app._tl_blocks if b.task_id == task.id]
         self.assertTrue(blocks)  # ブロックが描かれている
-        _x0, y0, _x1, y1, _cb, _tid, _done = blocks[0]
-        self.assertGreaterEqual(y0, 0)   # 負の y に描かれない（見切れない）
-        self.assertGreater(y1, y0)
+        block = blocks[0]
+        self.assertGreaterEqual(block.y0, 0)   # 負の y に描かれない（見切れない）
+        self.assertGreater(block.y1, block.y0)
 
     def test_many_overlapping_tasks_stay_visible(self):
         # 多数のタスクが同時刻に重なり、かつ Canvas 幅が狭いとき（最悪条件）でも
@@ -901,10 +901,9 @@ class CalendarRenderTests(AppTestCase):
         app, _ = self._app([t1, t2])
         app._render_timeline(today)
         blocks = {b.task_id: b for b in app._tl_blocks}  # task.id をキーにブロック矩形を引けるようにする
-        x0_a, y0_a, x1_a, y1_a, _cb_a, _id_a, _done_a = blocks[t1.id]
-        x0_b, y0_b, x1_b, y1_b, _cb_b, _id_b, _done_b = blocks[t2.id]
-        x_overlap = x0_a < x1_b and x0_b < x1_a  # 2 つのカードの x 範囲が重なっているか判定する
-        y_overlap = y0_a < y1_b and y0_b < y1_a  # 2 つのカードの y 範囲が重なっているか判定する
+        a, b = blocks[t1.id], blocks[t2.id]
+        x_overlap = a.x0 < b.x1 and b.x0 < a.x1  # 2 つのカードの x 範囲が重なっているか判定する
+        y_overlap = a.y0 < b.y1 and b.y0 < a.y1  # 2 つのカードの y 範囲が重なっているか判定する
         self.assertFalse(x_overlap and y_overlap)  # x も y も重なる（＝カード同士が重なって見える）状態にはならない
 
     def test_long_early_task_extends_grid_past_shorter_later_task(self):

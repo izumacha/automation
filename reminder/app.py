@@ -141,11 +141,12 @@ class PlannerApp:
         self._tl_width: int = theme.TIMELINE_PANEL_WIDTH  # 初期描画幅はテーマの寸法トークンを使う（<Configure> で実幅に更新する）
         # クリック判定用のブロック矩形（_render_timeline で毎回作り直す）。要素の並びは
         # _TimelineBlock の定義が唯一の真実の源なので、ここでは繰り返さない。
-        # 素の list（= list[Any]）にしないのは _assign_lanes の active と同じ理由:
-        # 要素の型を書かないと並びの取り違えを mypy が捕まえられない
-        # （実測で task.id と done を入れ替えても Success で通る）。取り違えると
-        # _on_timeline_click の unpack で task_id に bool が入り、
-        # チェックボックスを押してもタスクを完了できなくなる
+        # 素の list（= list[Any]）にしないのは _assign_lanes の active と同じ理由で、
+        # 要素の型を書かないと並びの取り違えを mypy が捕まえられないため。
+        # 注釈が守るのは **_TimelineBlock(...) を組み立てる側**（_draw_task_block）で、
+        # 型の違うフィールドを入れ替えると（例: task_id と done）そこで arg-type になる。
+        # 読み出し側は名前アクセスなので、同じ型どうしの入替（例: x1 と y1）は
+        # 型検査を素通りする——そちらは幾何を見るテストが受け持つ
         self._tl_blocks: list[_TimelineBlock] = []
 
         # 起動時・再描画時の整理（前日以前の完了破棄・未完了の繰り越し）は
@@ -857,8 +858,8 @@ class PlannerApp:
         見るようにする。片方だけがズームに追随すると、重なっていない隣接タスクが
         「重なっている」と判定されてカードが半幅に割れる。
         """
-        # テーマ側で HOUR_HEIGHT から導出済みの「1 分あたりのピクセル数」を返す
-        return theme.PX_PER_MINUTE
+        # 1 時間あたりの高さ（px）を 60 で割って「1 分あたりのピクセル数」にする
+        return theme.HOUR_HEIGHT / 60.0
 
     def _min_visual_minutes(self) -> float:
         """描画上の最低高さ（theme.CAL_MIN_BLOCK_HEIGHT px）を「分」に換算して返す。
