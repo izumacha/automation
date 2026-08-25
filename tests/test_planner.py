@@ -3,6 +3,7 @@
 GUI 依存を避けるため _build_ui・_refresh・_schedule_all をパッチして
 ロジック層（タスク追加・完了・削除・あとで⇄予定の移動・通知スケジュール）を検証する。
 """
+import contextlib
 import datetime
 import logging
 import unittest
@@ -72,17 +73,35 @@ class AppTestCase(unittest.TestCase):
     # （f"{-97:02d}" は "-97"、f"{-98:02d}" は "-98" になる）。
     _NEVER_AUTO_FILLED = (-97, -98)
 
+    # PlannerApp.__init__ を GUI 無し・実時計無しで走らせるためにパッチするメソッド名。
+    # ここを唯一の一覧にして、構築経路ごとに書き写さないようにする（書き写すと
+    # 新しいパッチを足したときに片方だけ取り残される。実際 _get_now の追加で
+    # test_init_schedules_periodic_refresh 側が実時計を読んだままになっていた）。
+    _INIT_PATCHED_METHODS = ("_build_ui", "_refresh", "_schedule_all", "_schedule_periodic_refresh")
+
+    @contextlib.contextmanager
+    def _construction_patches(self, tasks=None, prefs=None, skip=()):
+        """PlannerApp(root) を GUI 無しで構築するためのパッチ束を張る。
+
+        skip に渡したメソッド名だけはパッチせず、本物を実行させる
+        （例: 定期リフレッシュの登録そのものを検証したいテスト）。
+        """
+        with contextlib.ExitStack() as stack:
+            for name in self._INIT_PATCHED_METHODS:  # 一覧のうち skip 以外をパッチする
+                if name not in skip:
+                    stack.enter_context(patch.object(PlannerApp, name))
+            # __init__ が実時計を読まないよう _get_now を固定する（フレーク防止の要）
+            stack.enter_context(patch.object(PlannerApp, "_get_now", return_value=self._INIT_NOW))
+            stack.enter_context(patch("reminder.app.load_tasks", return_value=list(tasks or [])))
+            stack.enter_context(patch("reminder.app.load_prefs", return_value=prefs or Prefs()))
+            stack.enter_context(patch("reminder.app.tk.StringVar",
+                                      side_effect=lambda value="": _DummyVar(value)))
+            yield
+
     def _app(self, tasks=None, prefs=None):
         root = Mock()
         root.after.return_value = "job-1"
-        with patch.object(PlannerApp, "_build_ui"), \
-             patch.object(PlannerApp, "_refresh"), \
-             patch.object(PlannerApp, "_schedule_all"), \
-             patch.object(PlannerApp, "_schedule_periodic_refresh"), \
-             patch.object(PlannerApp, "_get_now", return_value=self._INIT_NOW), \
-             patch("reminder.app.load_tasks", return_value=list(tasks or [])), \
-             patch("reminder.app.load_prefs", return_value=prefs or Prefs()), \
-             patch("reminder.app.tk.StringVar", side_effect=lambda value="": _DummyVar(value)):
+        with self._construction_patches(tasks, prefs):
             app = PlannerApp(root)
         app.timeline_tree = Mock()
         app.timeline_tree.selection.return_value = ()
@@ -526,12 +545,10 @@ class PeriodicRefreshTests(AppTestCase):
         # は他のテストへの副作用を避けるためパッチ済みなのでここでは使わず組み立て直す）
         root = Mock()
         root.after.return_value = "tick-job"
-        with patch.object(PlannerApp, "_build_ui"), \
-             patch.object(PlannerApp, "_refresh"), \
-             patch.object(PlannerApp, "_schedule_all"), \
-             patch("reminder.app.load_tasks", return_value=[]), \
-             patch("reminder.app.load_prefs", return_value=Prefs()), \
-             patch("reminder.app.tk.StringVar", side_effect=lambda value="": _DummyVar(value)):
+        # パッチ束は _app() と共有し、_schedule_periodic_refresh だけ本物を走らせる。
+        # 以前はここでパッチを書き写しており、_app() 側へ足した _get_now の固定が
+        # 反映されず、この経路だけ実時計を読んだままになっていた
+        with self._construction_patches(skip=("_schedule_periodic_refresh",)):
             app = PlannerApp(root)  # 起動時に定期リフレッシュのジョブが登録されることを確認する対象
         # 起動直後に REFRESH_INTERVAL_MS 後の _tick 呼び出しがちょうど 1 件登録されている
         root.after.assert_called_once_with(REFRESH_INTERVAL_MS, app._tick)
@@ -832,8 +849,14 @@ class CalendarRenderTests(AppTestCase):
         # この式は _build_ui の中にあるとテストで丸ごとパッチされて一度も実行されず、
         # int() へ戻しても誰も気付けないため、メソッドに切り出して直接検証する。
         app, _ = self._app()
-        self.assertEqual(app._initial_canvas_height(),
-                         theme.CAL_INITIAL_HOURS * theme.HOUR_HEIGHT)
+        # 既定の HOUR_HEIGHT=60 では px/分 がちょうど 1.0 になり、往復に誤差が出ない。
+        # そのままだと int() でも round() でも 720 になり、この guard は何も守らない。
+        # 往復が割り切れない値（21 → 12*60*0.35 = 251.999...）を使って丸め方を固定する
+        for hour_height in (theme.HOUR_HEIGHT, 21, 42, 69):  # 既定値と、切り捨てが 1px 失う実例
+            with self.subTest(hour_height=hour_height), \
+                 patch.object(theme, "HOUR_HEIGHT", hour_height):
+                self.assertEqual(app._initial_canvas_height(),
+                                 theme.CAL_INITIAL_HOURS * hour_height)
 
     def test_tl_blocks_follow_timeline_row_order(self):
         # scheduled_rows の docstring は「戻り値の並び＝描画順＝_tl_blocks の順序＝
