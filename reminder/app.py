@@ -88,6 +88,13 @@ from .timeline import (
 
 _WEEKDAY_JA = ("月", "火", "水", "木", "金", "土", "日")
 
+# クリック判定用に 1 ブロックぶん控える情報の型。
+# (左, 上, 右, 下, チェックボックスの判定領域(左, 上, 右, 下), task.id, 完了フラグ)
+# 別名にしておくのは、生成側（_draw_task_block）と消費側（_on_timeline_click）が
+# 同じ 7 要素の並びを共有していることを型で示し、片方だけ並びを変えたときに
+# mypy が気付けるようにするため
+_TimelineBlock = tuple[float, float, float, float, tuple[float, float, float, float], str, bool]
+
 
 class PlannerApp:
     """タイムライン型タスクプランナーの GUI アプリ。
@@ -119,7 +126,12 @@ class PlannerApp:
         self._tl_selected: str | None = None
         self._tl_width: int = theme.TIMELINE_PANEL_WIDTH  # 初期描画幅はテーマの寸法トークンを使う（<Configure> で実幅に更新する）
         # クリック判定用のブロック矩形（_render_timeline で毎回作り直す）。
-        self._tl_blocks: list = []
+        # 素の list（= list[Any]）にしないのは _assign_lanes の active と同じ理由:
+        # 要素の型を書かないと、append する 7 要素タプルの並びを取り違えても
+        # mypy が捕まえられない（実測で task.id と done を入れ替えても Success で通る）。
+        # 取り違えると _on_timeline_click の unpack で task_id に bool が入り、
+        # チェックボックスを押してもタスクを完了できなくなる
+        self._tl_blocks: list[_TimelineBlock] = []
 
         # 起動時・再描画時の整理（前日以前の完了破棄・未完了の繰り越し）は
         # _refresh() 内の _roll_over() に集約している。
