@@ -13,6 +13,16 @@ from dataclasses import dataclass
 
 from .task import ISO_FMT, Task
 
+# このモジュール専用のロガー。
+# リポジトリの他モジュール（config.py / app.py）は logging.warning(...) でルートロガーへ
+# 直接出しているが、ここだけ名前付きロガーにしている。timeline.py は CLAUDE.md §10 が
+# 「Web/スマホ版と共有する移植可能な中核」と位置づける純粋ロジック側で、ライブラリとして
+# 他アプリに読み込まれうる。ルートロガーへ直接出すと、ロギング未設定のホストで
+# logging.warning() が暗黙に basicConfig() を呼び、ホストが要求していない StreamHandler と
+# WARNING レベルを root へ足してしまう（実測で確認）。名前付きロガーなら出力先とレベルの
+# 決定権をホストに残せる。他モジュールを移行するなら別変更としてまとめて行う。
+logger = logging.getLogger(__name__)
+
 # タイムライン行の種別
 ROW_TASK = "task"
 ROW_FREE = "free"
@@ -161,7 +171,7 @@ def scheduled_rows(rows: list[TimelineRow]) -> list[ScheduledRow]:
         # 到達したときは build_day_timeline 側が壊れている＝繰り返し鳴ってほしい状況。
         # 抑制のためにモジュール変数を持つと、純粋関数として保つと決めているこのモジュール
         # （CLAUDE.md §3 / 付録 B）に唯一の可変状態が入り、呼び出し順で結果が変わってしまう
-        logging.warning("タスク行に Task がありません。%d 件を表示から除外しました。", dropped)
+        logger.warning("タスク行に Task がありません。%d 件を表示から除外しました。", dropped)
 
     return entries  # 入力順を保ったタスク行ビューのリストを返す
 

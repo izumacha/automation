@@ -125,11 +125,12 @@ class PlannerApp:
         # 選択は Treeview ではなく「クリックされたブロックの task.id」で管理する。
         self._tl_selected: str | None = None
         self._tl_width: int = theme.TIMELINE_PANEL_WIDTH  # 初期描画幅はテーマの寸法トークンを使う（<Configure> で実幅に更新する）
-        # クリック判定用のブロック矩形（_render_timeline で毎回作り直す）。
+        # クリック判定用のブロック矩形（_render_timeline で毎回作り直す）。要素の並びは
+        # _TimelineBlock の定義が唯一の真実の源なので、ここでは繰り返さない。
         # 素の list（= list[Any]）にしないのは _assign_lanes の active と同じ理由:
-        # 要素の型を書かないと、append する 7 要素タプルの並びを取り違えても
-        # mypy が捕まえられない（実測で task.id と done を入れ替えても Success で通る）。
-        # 取り違えると _on_timeline_click の unpack で task_id に bool が入り、
+        # 要素の型を書かないと並びの取り違えを mypy が捕まえられない
+        # （実測で task.id と done を入れ替えても Success で通る）。取り違えると
+        # _on_timeline_click の unpack で task_id に bool が入り、
         # チェックボックスを押してもタスクを完了できなくなる
         self._tl_blocks: list[_TimelineBlock] = []
 
@@ -762,8 +763,8 @@ class PlannerApp:
         """
         cv = self.timeline_tree  # カレンダーを描く Canvas を取得する
         cv.delete("all")  # 前回の描画内容をすべて消去する
-        # クリック判定用（x0,y0,x1,y1, チェックボックス領域, task.id, 完了フラグ）。
-        self._tl_blocks = []  # ブロックのクリック判定情報リストをリセットする
+        # クリック判定用の情報（並びは _TimelineBlock の定義を参照）をリセットする
+        self._tl_blocks = []
         wake_min, sleep_min = self._wake_min(), self._sleep_min()  # 起床・就寝時刻を「分」で取得する
         now = now or self._get_now()  # 引数で現在時刻が渡されなければ _get_now() から取得する（_refresh からは同一時刻が渡される）
 
@@ -793,8 +794,7 @@ class PlannerApp:
         # 実時間（entry.end）だけで重なりを判定すると、クランプ分だけ隣のタスクと
         # 視覚的に重なってしまうため、最低高さを分に換算した「見た目の占有時間」を
         # 加味してレーンを分ける。
-        min_visual_minutes = theme.CAL_MIN_BLOCK_HEIGHT / scale  # 最低高さ（px）を「分」に換算する
-        lanes = self._assign_lanes(task_rows, min_visual_minutes)  # 重なるタスクをレーン（横列）に割り当てる
+        lanes = self._assign_lanes(task_rows, self._min_visual_minutes())  # 重なるタスクをレーン（横列）に割り当てる
         lane_count = (max(lanes.values()) + 1) if lanes else 1  # 必要なレーン数を計算する（最大レーン番号 +1）
         area_left = theme.CAL_GUTTER  # タスクブロックを置くエリアの左端位置（時刻ラベル分の余白）を設定する
         area_w = width - area_left - theme.CAL_BLOCK_GAP  # タスクブロックを置けるエリアの横幅を計算する
@@ -833,6 +833,19 @@ class PlannerApp:
                 cv.create_line(theme.CAL_GUTTER, y_of(half), width, y_of(half),
                                fill=theme.GRID_LINE_HALF)  # 30 分の補助線（薄い罫線）を描く
             t += datetime.timedelta(hours=1)  # 次の正時に進む
+
+    @staticmethod
+    def _min_visual_minutes() -> float:
+        """描画上の最低高さ（theme.CAL_MIN_BLOCK_HEIGHT px）を「分」に換算して返す。
+
+        1 行の式だがメソッドとして切り出しているのは、この換算が
+        「レーン割り当ての重なり判定に使う見た目の占有時間」という意味を持ち、
+        描画側とテスト側の両方が同じ値を必要とするため。テストが式を書き写すと、
+        本番の換算だけを変えたときにテストが古い値を使い続けて緑のまま通り、
+        実際のカードだけが割れる（§6 定数・式の一元管理）。
+        """
+        # 1 分あたりのピクセル数（_render_timeline の scale と同じ定義）で割って分に直す
+        return theme.CAL_MIN_BLOCK_HEIGHT / (theme.HOUR_HEIGHT / 60.0)
 
     @staticmethod
     def _assign_lanes(task_rows: list[ScheduledRow], min_visual_minutes: float = 0.0) -> dict[str, int]:

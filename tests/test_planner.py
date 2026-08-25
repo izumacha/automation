@@ -61,13 +61,7 @@ class AppTestCase(unittest.TestCase):
     #   別々にあり、例えば "09:00" を設定するテストは実時刻 08:55〜08:59 の
     #   5 分間だけ落ちる）。構築時だけこの固定値を見せて自動補完値を実時計から切り離す。
     #
-    # 03:33 を選ぶ理由: _default_start により自動補完値が 03:35 になり、
-    # 現在どのテストが設定する開始時刻とも衝突しない。
-    # **衝突させないことが前提**である点に注意: 仮に将来のテストが
-    # hour_var="03" / minute_var="35" を設定し、かつ _get_now を差し替えないと、
-    # 「未変更」と誤判定されて実時計基準で上書きされ、同じ時刻依存フレークが
-    # 向きを変えて復活する（そのテストは実時刻 03:30〜03:34 だけ通る）。
-    # 03:35 を開始時刻に使いたいときは _get_now も必ず差し替えること。
+    # 03:33 を選ぶ理由: _default_start により入力欄の初期値が 03:35 で決定的になる。
     _INIT_NOW = datetime.datetime(2026, 6, 1, 3, 33)
 
     def _app(self, tasks=None, prefs=None):
@@ -89,19 +83,21 @@ class AppTestCase(unittest.TestCase):
         app.backlog_tree.selection.return_value = ()
         app.backlog_tree.get_children.return_value = ()
         app.status_var = _DummyVar()
-        # 構築後は _get_now のパッチが外れ、本物のメソッドに戻る。テストが
-        # app._get_now を差し替えれば従来どおりその時刻が使われ、差し替えなければ
-        # 実時計に戻る（既存テストの前提を変えない）。
-        # ここで決定的になるのは _auto_start_default と入力欄の初期値だけで、
-        # それによって「ユーザーが触ったか」の判定が実行時刻に左右されなくなる。
-        #
-        # 注意（残っている前提）: これは開始時刻そのものを固定するものではない。
-        # 開始時刻を扱うテストは、_get_now を差し替えるか hour_var / minute_var を
-        # 明示設定するか、少なくとも一方を必ず行うこと。どちらもしないと
-        # _refresh_stale_start_default() が「未変更」と判定して実時計基準で
-        # 入力欄を上書きし、結果が実行時刻に依存する（このフィクスチャが
-        # 断てるのは「明示設定した値が実行時刻とたまたま一致して未変更と
-        # 誤判定される」経路までで、そもそも何も指定しない場合は対象外）。
+        # 実時計への依存を 2 段構えで断つ。
+        # (1) 上の _get_now パッチにより、入力欄の初期値が _INIT_NOW 由来の
+        #     "03"/"35" で決定的になる（実時計を見ない）。
+        # (2) _auto_start_default を、表示値と一致しえない番兵へ倒す。
+        #     _refresh_stale_start_default() は「表示値 == _auto_start_default」を
+        #     『ユーザーは触っていない』の判定に使うが、_default_start は必ず
+        #     0〜23 時・5 分刻みを返すので (-1, -1) と一致することが原理的にない。
+        #     これでどんな開始時刻を設定しても常に「ユーザーが編集した」と扱われ、
+        #     「明示設定した値がたまたま自動補完値と一致して上書きされる」経路が
+        #     コメント上の約束ではなく構造として塞がる。
+        # (1) だけだと "03:35" を設定するテストが実時刻 03:30〜03:34 でだけ通る
+        # フレークになり、(2) だけだと入力欄の初期値が実時計由来のまま残る。
+        # 自動補完そのものの挙動を検証する 2 件は、_auto_start_default を自分で
+        # 設定し直すため影響を受けない。
+        app._auto_start_default = (-1, -1)
         return app, root
 
 
@@ -850,12 +846,15 @@ class CalendarRenderTests(AppTestCase):
         # このテストが見たい境界（重なっていない＝同一レーン）を測れない。
         # デザイントークンを変えただけで意味不明な座標比較エラーになるのを避けるため、
         # 前提が崩れたことをここで名指しで落とす
-        min_visual_minutes = theme.CAL_MIN_BLOCK_HEIGHT / (theme.HOUR_HEIGHT / 60.0)
+        # 換算は本番の _min_visual_minutes() をそのまま呼ぶ。式をここへ書き写すと、
+        # 本番の換算だけを変えたときにこのガードが古い値で通過してしまい、
+        # 結局「意味不明な座標比較エラー」で落ちる（＝ガードの目的を果たさない）
+        min_visual_minutes = PlannerApp._min_visual_minutes()
         duration = 30  # 隣接ペアの所要時間（分）
         self.assertGreater(
             duration, min_visual_minutes,
             "所要時間が最低高さ換算以下だと描画クランプで別レーンになり、この境界テストが成立しない。"
-            "theme の寸法トークンを変えたなら duration を上げること",
+            "theme の寸法トークンか _min_visual_minutes() の換算を変えたなら duration を上げること",
         )
         tasks = [
             Task(title="前半", due=_iso(base), duration_min=duration),                                    # 9:00-9:30
