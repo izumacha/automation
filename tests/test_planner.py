@@ -71,6 +71,16 @@ class AppTestCase(unittest.TestCase):
         app.backlog_tree.selection.return_value = ()
         app.backlog_tree.get_children.return_value = ()
         app.status_var = _DummyVar()
+        # PlannerApp.__init__ は実時計を見て「開始時刻欄の自動補完値」を決めるため、
+        # _auto_start_default が実行時刻しだいで変わる。テストが開始時刻を明示設定したとき、
+        # その値がたまたま実行時刻の既定値と一致すると _refresh_stale_start_default() が
+        # 「ユーザーは触っていない」と誤判定して入力値を上書きし、時間帯によってだけ
+        # 落ちるテストになる（例: 実時刻 08:55〜08:59 に走らせると既定値が 09:00 になり、
+        # "09:00" を設定するテストが 5 分間だけ落ちる）。
+        # ここで「_default_start が絶対に返さない値」へ倒し、明示設定は常に
+        # 「ユーザーが編集した」と見なされるようにして、実行時刻への依存を断つ。
+        # 自動補完の挙動そのものを検証するテストは、この値を自分で設定し直す。
+        app._auto_start_default = (-1, -1)
         return app, root
 
 
@@ -228,12 +238,6 @@ class AddToTimelineTests(AppTestCase):
         app, _ = self._app()
         fixed = datetime.datetime(2026, 6, 1, 12, 0)
         app._get_now = lambda: fixed
-        # 回帰修正: _app() はアプリ構築を実時計基準で行うため、_auto_start_default が
-        # たまたま実行時刻の既定値（例: 実行時刻が 9:55〜10:00 なら "10:00"）になっている
-        # ことがある。下で "10:00" を明示的に設定する前に、それと衝突しない値へ
-        # リセットしておかないと、_refresh_stale_start_default() が「未変更」と誤判定して
-        # 上書きしてしまい、実行時刻帯によってテストが不安定になる（既知のフレーキーテスト）
-        app._auto_start_default = (0, 0)
         app.title_var.set("朝活")
         app.hour_var.set("10")
         app.minute_var.set("00")
@@ -267,7 +271,6 @@ class AddToTimelineTests(AppTestCase):
         app, _ = self._app(prefs=Prefs(wake="09:00", sleep="01:00"))  # 夜型レンジの設定でアプリを生成する
         fixed = datetime.datetime(2026, 7, 15, 0, 30)  # 深夜 00:30(プランナー日は前日 7/14)に固定する
         app._get_now = lambda: fixed  # 実時計に依存しないよう現在時刻を固定する
-        app._auto_start_default = (0, 0)  # 既定値の自動更新が入力値を上書きしないようリセットする
         app.title_var.set("朝会の準備")  # タスク名を入力する
         app.hour_var.set("10")  # 開始時刻の「時」を入力する
         app.minute_var.set("00")  # 開始時刻の「分」を入力する
@@ -285,7 +288,6 @@ class AddToTimelineTests(AppTestCase):
         app, _ = self._app(prefs=Prefs(wake="09:00", sleep="01:00"))  # 夜型レンジの設定でアプリを生成する
         fixed = datetime.datetime(2026, 7, 15, 23, 30)  # 夜 23:30(プランナー日は 7/15)に固定する
         app._get_now = lambda: fixed  # 実時計に依存しないよう現在時刻を固定する
-        app._auto_start_default = (0, 0)  # 既定値の自動更新が入力値を上書きしないようリセットする
         app.title_var.set("夜のストレッチ")  # タスク名を入力する
         app.hour_var.set("00")  # 開始時刻の「時」を入力する
         app.minute_var.set("15")  # 開始時刻の「分」を入力する
