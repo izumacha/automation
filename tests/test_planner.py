@@ -64,6 +64,14 @@ class AppTestCase(unittest.TestCase):
     # 03:33 を選ぶ理由: _default_start により入力欄の初期値が 03:35 で決定的になる。
     _INIT_NOW = datetime.datetime(2026, 6, 1, 3, 33)
 
+    # 「この値が入力欄に表示されていることはありえない」ことを表す番兵。
+    # _refresh_stale_start_default() が『ユーザーは触っていない』判定に使う
+    # _auto_start_default をこれで潰し、テストの明示設定を常に「編集済み」と扱わせる。
+    # 時と分で違う値にしているのは、時刻欄の境界値テストが書きそうな
+    # "-1" / "0" / "24" / "60" のような単一値と偶然一致しないようにするため
+    # （f"{-97:02d}" は "-97"、f"{-98:02d}" は "-98" になる）。
+    _NEVER_AUTO_FILLED = (-97, -98)
+
     def _app(self, tasks=None, prefs=None):
         root = Mock()
         root.after.return_value = "job-1"
@@ -86,18 +94,22 @@ class AppTestCase(unittest.TestCase):
         # 実時計への依存を 2 段構えで断つ。
         # (1) 上の _get_now パッチにより、入力欄の初期値が _INIT_NOW 由来の
         #     "03"/"35" で決定的になる（実時計を見ない）。
-        # (2) _auto_start_default を、表示値と一致しえない番兵へ倒す。
-        #     _refresh_stale_start_default() は「表示値 == _auto_start_default」を
-        #     『ユーザーは触っていない』の判定に使うが、_default_start は必ず
-        #     0〜23 時・5 分刻みを返すので (-1, -1) と一致することが原理的にない。
-        #     これでどんな開始時刻を設定しても常に「ユーザーが編集した」と扱われ、
-        #     「明示設定した値がたまたま自動補完値と一致して上書きされる」経路が
-        #     コメント上の約束ではなく構造として塞がる。
+        # (2) _auto_start_default を、テストが入力しそうにない値へ倒す。
+        #     _refresh_stale_start_default() は「表示文字列 == f"{値:02d}"」で
+        #     『ユーザーは触っていない』を判定する。_default_start は必ず
+        #     0〜23 時・5 分刻みを返すので、負値なら自動補完値と衝突しない。
+        #     これでどんな開始時刻を設定しても「ユーザーが編集した」と扱われ、
+        #     「明示設定した値がたまたま自動補完値と一致して上書きされる」経路が塞がる。
         # (1) だけだと "03:35" を設定するテストが実時刻 03:30〜03:34 でだけ通る
         # フレークになり、(2) だけだと入力欄の初期値が実時計由来のまま残る。
+        #
+        # 残る前提: 判定は**表示文字列**の一致なので、番兵と同じ文字列を入力欄へ
+        # 設定するテストを書けば衝突しうる（(-1, -1) だと "-1" を入力する
+        # 境界値テストが該当した）。時刻欄の境界値として書かれうる "-1" / "24" /
+        # "60" などから離れた非対称な値にして、実質的に衝突を起こしようがなくしている。
         # 自動補完そのものの挙動を検証する 2 件は、_auto_start_default を自分で
         # 設定し直すため影響を受けない。
-        app._auto_start_default = (-1, -1)
+        app._auto_start_default = self._NEVER_AUTO_FILLED
         return app, root
 
 
@@ -702,7 +714,7 @@ class CalendarRenderTests(AppTestCase):
         task = Task(title="早朝", due=_iso(due), duration_min=30)
         app, _ = self._app([task])
         app._render_timeline(today)
-        blocks = [b for b in app._tl_blocks if b[5] == task.id]
+        blocks = [b for b in app._tl_blocks if b.task_id == task.id]
         self.assertTrue(blocks)  # ブロックが描かれている
         _x0, y0, _x1, y1, _cb, _tid, _done = blocks[0]
         self.assertGreaterEqual(y0, 0)   # 負の y に描かれない（見切れない）
@@ -832,7 +844,7 @@ class CalendarRenderTests(AppTestCase):
         app, _ = self._app(tasks)
         app._render_timeline(today)
         # _tl_blocks の task.id 列が、タイムライン行（＝開始時刻順）の並びと一致する
-        self.assertEqual([b[5] for b in app._tl_blocks], [t.id for t in tasks])
+        self.assertEqual([b.task_id for b in app._tl_blocks], [t.id for t in tasks])
 
     def test_assign_lanes_keeps_adjacent_tasks_in_one_lane(self):
         # active から取り除く条件は半開区間（end > entry.start）でなければならない。
@@ -854,28 +866,26 @@ class CalendarRenderTests(AppTestCase):
         # このテストが見たい境界（重なっていない＝同一レーン）を測れない。
         # デザイントークンを変えただけで意味不明な座標比較エラーになるのを避けるため、
         # 前提が崩れたことをここで名指しで落とす
-        # 換算は本番の _min_visual_minutes() をそのまま呼ぶ。式をここへ書き写すと、
-        # 本番の換算だけを変えたときにこのガードが古い値で通過してしまい、
-        # 結局「意味不明な座標比較エラー」で落ちる（＝ガードの目的を果たさない）
-        min_visual_minutes = PlannerApp._min_visual_minutes()
         duration = 30  # 隣接ペアの所要時間（分）
-        self.assertGreater(
-            duration, min_visual_minutes,
-            "所要時間が最低高さ換算以下だと描画クランプで別レーンになり、この境界テストが成立しない。"
-            "theme の寸法トークンか _min_visual_minutes() の換算を変えたなら duration を上げること",
-        )
         tasks = [
             Task(title="前半", due=_iso(base), duration_min=duration),                                    # 9:00-9:30
             Task(title="後半", due=_iso(base + datetime.timedelta(minutes=duration)), duration_min=duration),  # 9:30-10:00（隙間ゼロ）
         ]
         app, _ = self._app(tasks)
+        # 換算は本番の _min_visual_minutes() を実インスタンスから呼ぶ。式をここへ書き写すと、
+        # 本番の換算（や将来の表示倍率）だけを変えたときにこのガードが古い値で通過し、
+        # 結局「意味不明な座標比較エラー」で落ちる（＝ガードの目的を果たさない）
+        self.assertGreater(
+            duration, app._min_visual_minutes(),
+            "所要時間が最低高さ換算以下だと描画クランプで別レーンになり、この境界テストが成立しない。"
+            "theme の寸法トークンか _px_per_minute() / _min_visual_minutes() の換算を変えたなら duration を上げること",
+        )
         app._render_timeline(today)
-        blocks = {b[5]: b for b in app._tl_blocks}  # task.id をキーにブロック矩形を引けるようにする
-        x0_a, _y0_a, x1_a, _y1_a, _cb_a, _id_a, _done_a = blocks[tasks[0].id]
-        x0_b, _y0_b, x1_b, _y1_b, _cb_b, _id_b, _done_b = blocks[tasks[1].id]
+        blocks = {b.task_id: b for b in app._tl_blocks}  # task.id をキーにブロック矩形を引けるようにする
+        block_a, block_b = blocks[tasks[0].id], blocks[tasks[1].id]
         # 隣接しているだけで重なっていないので、2 件とも同じレーン＝同じ x 範囲に全幅で描かれる
-        self.assertAlmostEqual(x0_a, x0_b)
-        self.assertAlmostEqual(x1_a, x1_b)
+        self.assertAlmostEqual(block_a.x0, block_b.x0)
+        self.assertAlmostEqual(block_a.x1, block_b.x1)
 
     def test_short_consecutive_tasks_do_not_visually_overlap(self):
         # 所要時間が短いタスク（描画時に theme.CAL_MIN_BLOCK_HEIGHT へクランプされる）が
@@ -890,7 +900,7 @@ class CalendarRenderTests(AppTestCase):
         t2 = Task(title="短いB", due=_iso(start2), duration_min=5)
         app, _ = self._app([t1, t2])
         app._render_timeline(today)
-        blocks = {b[5]: b for b in app._tl_blocks}  # task.id をキーにブロック矩形を引けるようにする
+        blocks = {b.task_id: b for b in app._tl_blocks}  # task.id をキーにブロック矩形を引けるようにする
         x0_a, y0_a, x1_a, y1_a, _cb_a, _id_a, _done_a = blocks[t1.id]
         x0_b, y0_b, x1_b, y1_b, _cb_b, _id_b, _done_b = blocks[t2.id]
         x_overlap = x0_a < x1_b and x0_b < x1_a  # 2 つのカードの x 範囲が重なっているか判定する
@@ -938,7 +948,7 @@ class CalendarRenderTests(AppTestCase):
         app.date_var = _DummyVar()
         app.stats_var = _DummyVar()
         app._render_timeline(today)
-        blocks = [b for b in app._tl_blocks if b[5] == task.id]
+        blocks = [b for b in app._tl_blocks if b.task_id == task.id]
         self.assertTrue(blocks)
         cb = blocks[0][4]
         ev = Mock()

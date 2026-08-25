@@ -33,6 +33,8 @@ from .time_utils import (
     delay_ms_until,
 )
 from .timeline import (
+    ScheduledRow,
+    TimelineRow,
     backlog_tasks,
     build_day_timeline,
     carry_over_overdue,
@@ -97,6 +99,8 @@ __all__ = [
     "suggest_for_free_time",
     "free_minutes_today",
     "scheduled_rows",
+    "ScheduledRow",
+    "TimelineRow",
     "format_duration",
     "completed_count_on",
     "current_streak",

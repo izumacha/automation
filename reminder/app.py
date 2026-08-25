@@ -23,6 +23,7 @@ import os
 import tkinter as tk
 from collections.abc import Callable
 from tkinter import messagebox, ttk
+from typing import NamedTuple
 
 from . import theme
 from .config import (
@@ -88,12 +89,24 @@ from .timeline import (
 
 _WEEKDAY_JA = ("月", "火", "水", "木", "金", "土", "日")
 
-# クリック判定用に 1 ブロックぶん控える情報の型。
-# (左, 上, 右, 下, チェックボックスの判定領域(左, 上, 右, 下), task.id, 完了フラグ)
-# 別名にしておくのは、生成側（_draw_task_block）と消費側（_on_timeline_click）が
-# 同じ 7 要素の並びを共有していることを型で示し、片方だけ並びを変えたときに
-# mypy が気付けるようにするため
-_TimelineBlock = tuple[float, float, float, float, tuple[float, float, float, float], str, bool]
+class _TimelineBlock(NamedTuple):
+    """クリック判定用に 1 ブロックぶん控える情報。
+
+    生成側（_draw_task_block）と消費側（_on_timeline_click）が同じ並びを共有して
+    いることを型で示し、片方だけ並びを変えたときに mypy が気付けるようにする。
+    素の tuple 別名ではなく NamedTuple にしているのは、読み出し側が b[3] / b[5] の
+    ような添字ではなく b.y1 / b.task_id と名前で読めるようにするため。
+    テストは mypy の検査対象外（pyproject の files = ["reminder"]）なので、
+    添字のままだと並びを変えたときテスト側は実行時まで気付けない（§6 マジックナンバーを避ける）。
+    """
+
+    x0: float  # ブロック左端の x 座標
+    y0: float  # ブロック上端の y 座標
+    x1: float  # ブロック右端の x 座標
+    y1: float  # ブロック下端の y 座標
+    cb_box: tuple[float, float, float, float]  # チェックボックスの判定領域（左, 上, 右, 下）
+    task_id: str  # このブロックが表すタスクの ID
+    done: bool  # 完了済みかどうか
 
 
 class PlannerApp:
@@ -781,7 +794,7 @@ class PlannerApp:
         window_start = min(r.start for r in rows)  # 表示ウィンドウの開始時刻(全行中の最小開始)
         window_end = max(r.end for r in rows)  # 表示ウィンドウの終了時刻(全行中の最大終了)
 
-        scale = theme.PX_PER_MINUTE  # 1 分あたりのピクセル数（換算はテーマ側の唯一の定義）
+        scale = self._px_per_minute()  # 1 分あたりのピクセル数（この描画で使う唯一の換算源）
 
         def y_of(dt: datetime.datetime) -> float:
             return theme.CAL_PAD_TOP + (dt - window_start).total_seconds() / 60.0 * scale  # 日時を Canvas の y 座標（ピクセル）に変換する
@@ -806,7 +819,7 @@ class PlannerApp:
 
         # scrollregion はブロック描画後に確定する。最低高を確保した短いタスクが
         # window_end を超えて伸びても、下端とチェックボックスが見切れないようにする。
-        content_bottom = max([y_of(window_end)] + [b[3] for b in self._tl_blocks])  # 全ブロックの下端と表示ウィンドウ終端（window_end）の遅い方をコンテンツ底辺とする
+        content_bottom = max([y_of(window_end)] + [b.y1 for b in self._tl_blocks])  # 全ブロックの下端と表示ウィンドウ終端（window_end）の遅い方をコンテンツ底辺とする
         height = int(content_bottom + theme.CAL_PAD_TOP)  # 下余白を加えた Canvas 総高さを計算する
         cv.configure(scrollregion=(0, 0, width, height))  # Canvas のスクロール可能領域を確定させる
 
@@ -834,8 +847,19 @@ class PlannerApp:
                                fill=theme.GRID_LINE_HALF)  # 30 分の補助線（薄い罫線）を描く
             t += datetime.timedelta(hours=1)  # 次の正時に進む
 
-    @staticmethod
-    def _min_visual_minutes() -> float:
+    def _px_per_minute(self) -> float:
+        """このアプリが「分 → px」に使う倍率を返す（描画の scale の唯一の源）。
+
+        現状はテーマの固定トークンをそのまま返すだけだが、**表示倍率（ズーム）を
+        入れるならここ 1 か所で掛ける**。インスタンスメソッドにしているのはそのため:
+        描画の scale と、下の _min_visual_minutes()（px→分の逆換算）が必ず同じ倍率を
+        見るようにする。片方だけがズームに追随すると、重なっていない隣接タスクが
+        「重なっている」と判定されてカードが半幅に割れる。
+        """
+        # テーマ側で HOUR_HEIGHT から導出済みの「1 分あたりのピクセル数」を返す
+        return theme.PX_PER_MINUTE
+
+    def _min_visual_minutes(self) -> float:
         """描画上の最低高さ（theme.CAL_MIN_BLOCK_HEIGHT px）を「分」に換算して返す。
 
         1 行の式だがメソッドとして切り出しているのは、この換算が
@@ -844,8 +868,8 @@ class PlannerApp:
         本番の換算だけを変えたときにテストが古い値を使い続けて緑のまま通り、
         実際のカードだけが割れる（§6 定数・式の一元管理）。
         """
-        # 1 分あたりのピクセル数（_render_timeline の scale と同じ唯一の定義）で割って分に直す
-        return theme.CAL_MIN_BLOCK_HEIGHT / theme.PX_PER_MINUTE
+        # 描画が使うのと同じ倍率で割る（_px_per_minute を経由するのでズームにも追随する）
+        return theme.CAL_MIN_BLOCK_HEIGHT / self._px_per_minute()
 
     @staticmethod
     def _assign_lanes(task_rows: list[ScheduledRow], min_visual_minutes: float = 0.0) -> dict[str, int]:
@@ -944,7 +968,7 @@ class PlannerApp:
             cv.create_oval(cb_cx - r, cb_cy - r, cb_cx + r, cb_cy + r,
                            outline=accent, width=theme.CAL_CHECK_OUTLINE_W, tags=("task", task.id))  # 枠線だけの円（空のチェックボックス）を描く（枠線の太さはテーマのトークン）
 
-        self._tl_blocks.append((x0, y0, x1, y1, cb_box, task.id, done))  # クリック判定情報をリストに追加する
+        self._tl_blocks.append(_TimelineBlock(x0, y0, x1, y1, cb_box, task.id, done))  # クリック判定情報をリストに追加する
 
         # タイトル・時刻（チェックボックスの右）。繰り返しタスクは 🔁 を添える
         # （旧タイムラインの「繰り返し」列で示していた情報をカードでも残す）。

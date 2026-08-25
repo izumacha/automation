@@ -574,9 +574,10 @@ class ScheduledRowTests(unittest.TestCase):
         with self.assertLogs("reminder.timeline", level="WARNING") as captured:
             scheduled_rows(rows)
         self.assertEqual(len(captured.records), 1)  # 1 回の呼び出しにつきまとめて 1 行
-        message = captured.records[0].getMessage()
-        self.assertIn("1", message)  # 捨てた件数（1 件）が含まれる
-        self.assertNotIn("4", message)  # 入力の行数（4 行）を報告していない
+        # 文言への部分文字列一致ではなく、ログに渡した引数そのものを固定する。
+        # "1" の in 判定だと 13 や 21 を報告する回帰も通ってしまい、
+        # 「入力の行数ではなく捨てた件数を報告する」という本来の主張を固定できない
+        self.assertEqual(captured.records[0].args, (1,))
 
     def test_valid_rows_do_not_warn(self):
         # 正常な行だけのときは警告を出さない（ログのノイズで本物の異常を埋もれさせない）
