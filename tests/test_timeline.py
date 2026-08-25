@@ -571,7 +571,7 @@ class ScheduledRowTests(unittest.TestCase):
         # 実運用（50 行の日に 1 行だけ壊れる）で「50 件除外しました」と
         # 一日の予定がほぼ消えたかのように誤報する回帰を見逃す
         rows = [self._row(9, "朝会"), self._broken_row(11), self._row(13, "昼会"), self._row(15, "夕会")]
-        with self.assertLogs("reminder.timeline", level="WARNING") as captured:
+        with self.assertLogs(level="WARNING") as captured:
             scheduled_rows(rows)
         self.assertEqual(len(captured.records), 1)  # 1 回の呼び出しにつきまとめて 1 行
         message = captured.records[0].getMessage()
@@ -580,7 +580,7 @@ class ScheduledRowTests(unittest.TestCase):
 
     def test_valid_rows_do_not_warn(self):
         # 正常な行だけのときは警告を出さない（ログのノイズで本物の異常を埋もれさせない）
-        with self.assertNoLogs("reminder.timeline", level="WARNING"):
+        with self.assertNoLogs(level="WARNING"):
             self.assertEqual(len(scheduled_rows([self._row(9, "朝会")])), 1)
 
     def test_free_rows_do_not_warn(self):
@@ -595,7 +595,7 @@ class ScheduledRowTests(unittest.TestCase):
             now=datetime.datetime(2026, 6, 6, 8, 0),
         )
         self.assertTrue(any(r.kind == ROW_FREE for r in rows))  # 空き時間行が含まれている前提を確かめる
-        with self.assertNoLogs("reminder.timeline", level="WARNING"):
+        with self.assertNoLogs(level="WARNING"):
             scheduled_rows(rows)
 
     def test_is_hashable_by_identity(self):

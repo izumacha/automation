@@ -39,6 +39,7 @@ from .timeline import (
     format_duration,
     free_minutes_today,
     prune_old_completed,
+    scheduled_rows,
     suggest_for_free_time,
 )
 
@@ -95,6 +96,7 @@ __all__ = [
     "backlog_tasks",
     "suggest_for_free_time",
     "free_minutes_today",
+    "scheduled_rows",
     "format_duration",
     "completed_count_on",
     "current_streak",

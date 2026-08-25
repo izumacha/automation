@@ -57,11 +57,17 @@ class AppTestCase(unittest.TestCase):
     # 実時計のままだと _auto_start_default が実行時刻しだいで変わり、テストが
     # 開始時刻を明示設定したときにその値とたまたま一致して、
     # _refresh_stale_start_default() が「ユーザーは触っていない」と誤判定する
-    # （＝時間帯によってだけ落ちるテストになる。実測で 08:55〜08:59 の 5 分間）。
-    # 構築時だけこの固定値を見せて、自動補完値を実行時刻から切り離す。
-    # 03:33 を選ぶ理由: 既定値は _default_start により 03:35 になり、
-    # どのテストが設定する開始時刻とも衝突しない（衝突しても実行時刻には依存しないので、
-    # 落ちるなら常に落ちて原因がすぐ分かる）。
+    # （＝時間帯によってだけ落ちるテストになる。窓はテストが設定する時刻ごとに
+    #   別々にあり、例えば "09:00" を設定するテストは実時刻 08:55〜08:59 の
+    #   5 分間だけ落ちる）。構築時だけこの固定値を見せて自動補完値を実時計から切り離す。
+    #
+    # 03:33 を選ぶ理由: _default_start により自動補完値が 03:35 になり、
+    # 現在どのテストが設定する開始時刻とも衝突しない。
+    # **衝突させないことが前提**である点に注意: 仮に将来のテストが
+    # hour_var="03" / minute_var="35" を設定し、かつ _get_now を差し替えないと、
+    # 「未変更」と誤判定されて実時計基準で上書きされ、同じ時刻依存フレークが
+    # 向きを変えて復活する（そのテストは実時刻 03:30〜03:34 だけ通る）。
+    # 03:35 を開始時刻に使いたいときは _get_now も必ず差し替えること。
     _INIT_NOW = datetime.datetime(2026, 6, 1, 3, 33)
 
     def _app(self, tasks=None, prefs=None):
@@ -807,6 +813,23 @@ class CalendarRenderTests(AppTestCase):
         # B(9:30-9:45) と D(9:39-9:54) は重なっているので、必ず別レーンでなければならない
         self.assertNotEqual(lanes[entries["B"].task.id], lanes[entries["D"].task.id])
 
+    def test_tl_blocks_follow_timeline_row_order(self):
+        # scheduled_rows の docstring は「戻り値の並び＝描画順＝_tl_blocks の順序＝
+        # クリック判定の最前面優先」という連鎖を根拠に「並べ替えてはいけない」と
+        # 定めている。だが scheduled_rows の出口を固定するテストだけでは、
+        # 消費側（_render_timeline の描画ループ）を reversed() や sorted() に
+        # 変えても無警告で通ってしまう。連鎖の 2 本目のリンクをここで固定する。
+        today = datetime.date.today()
+        base = datetime.datetime.combine(today, datetime.time(9, 0))
+        tasks = [
+            Task(title=f"予定{i}", due=_iso(base + datetime.timedelta(hours=i)), duration_min=30)
+            for i in range(3)
+        ]
+        app, _ = self._app(tasks)
+        app._render_timeline(today)
+        # _tl_blocks の task.id 列が、タイムライン行（＝開始時刻順）の並びと一致する
+        self.assertEqual([b[5] for b in app._tl_blocks], [t.id for t in tasks])
+
     def test_assign_lanes_keeps_adjacent_tasks_in_one_lane(self):
         # active から取り除く条件は半開区間（end > entry.start）でなければならない。
         # 「前のタスクが終わった瞬間に次が始まる」隣接タスクは重なっていないので、
@@ -822,9 +845,21 @@ class CalendarRenderTests(AppTestCase):
         # 緑のまま通り、実際のカードは半幅に割れる（§6 の一元管理）。
         today = datetime.date.today()
         base = datetime.datetime.combine(today, datetime.time(9, 0))
+        # 所要時間は「最低高さ換算より長い」必要がある。短いと描画上クランプされて
+        # visual_end が次の開始を越え、隣接していても正しく別レーンになるため、
+        # このテストが見たい境界（重なっていない＝同一レーン）を測れない。
+        # デザイントークンを変えただけで意味不明な座標比較エラーになるのを避けるため、
+        # 前提が崩れたことをここで名指しで落とす
+        min_visual_minutes = theme.CAL_MIN_BLOCK_HEIGHT / (theme.HOUR_HEIGHT / 60.0)
+        duration = 30  # 隣接ペアの所要時間（分）
+        self.assertGreater(
+            duration, min_visual_minutes,
+            "所要時間が最低高さ換算以下だと描画クランプで別レーンになり、この境界テストが成立しない。"
+            "theme の寸法トークンを変えたなら duration を上げること",
+        )
         tasks = [
-            Task(title="前半", due=_iso(base), duration_min=30),                                    # 9:00-9:30
-            Task(title="後半", due=_iso(base + datetime.timedelta(minutes=30)), duration_min=30),   # 9:30-10:00（隙間ゼロ）
+            Task(title="前半", due=_iso(base), duration_min=duration),                                    # 9:00-9:30
+            Task(title="後半", due=_iso(base + datetime.timedelta(minutes=duration)), duration_min=duration),  # 9:30-10:00（隙間ゼロ）
         ]
         app, _ = self._app(tasks)
         app._render_timeline(today)

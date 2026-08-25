@@ -13,9 +13,6 @@ from dataclasses import dataclass
 
 from .task import ISO_FMT, Task
 
-# このモジュールのログ出力先（想定外の行を捨てたことを記録するために使う）
-logger = logging.getLogger(__name__)
-
 # タイムライン行の種別
 ROW_TASK = "task"
 ROW_FREE = "free"
@@ -164,7 +161,7 @@ def scheduled_rows(rows: list[TimelineRow]) -> list[ScheduledRow]:
         # 到達したときは build_day_timeline 側が壊れている＝繰り返し鳴ってほしい状況。
         # 抑制のためにモジュール変数を持つと、純粋関数として保つと決めているこのモジュール
         # （CLAUDE.md §3 / 付録 B）に唯一の可変状態が入り、呼び出し順で結果が変わってしまう
-        logger.warning("タスク行に Task がありません。%d 件を表示から除外しました。", dropped)
+        logging.warning("タスク行に Task がありません。%d 件を表示から除外しました。", dropped)
 
     return entries  # 入力順を保ったタスク行ビューのリストを返す
 
