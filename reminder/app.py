@@ -68,11 +68,10 @@ from .time_utils import (
 from .timeline import (
     DEFAULT_SLEEP_MIN,
     DEFAULT_WAKE_MIN,
-    ROW_TASK,
     STATUS_DONE,
     STATUS_NOW,
     STATUS_PAST,
-    TimelineRow,
+    ScheduledRow,
     backlog_tasks,
     build_day_timeline,
     carry_over_overdue,
@@ -83,6 +82,7 @@ from .timeline import (
     min_to_hhmm,
     planner_day,
     prune_old_completed,
+    scheduled_rows,
     suggest_for_free_time,
 )
 
@@ -756,7 +756,7 @@ class PlannerApp:
         now = now or self._get_now()  # 引数で現在時刻が渡されなければ _get_now() から取得する（_refresh からは同一時刻が渡される）
 
         rows = build_day_timeline(self.tasks, today, wake_min, sleep_min, now)  # 今日のタイムライン行データを構築する
-        task_rows = [r for r in rows if r.kind == ROW_TASK and r.task is not None]  # タスク行だけを抜き出す
+        task_rows = scheduled_rows(rows)  # タスク行だけを抜き出し、行と Task の組にして受け取る
 
         # 表示ウィンドウ（起床前/就寝後に始まる・終わるタスクも可視範囲に含めた範囲）は
         # build_day_timeline 側で既に計算済みなので、day_start/day_end や個々のタスクから
@@ -787,8 +787,8 @@ class PlannerApp:
         area_left = theme.CAL_GUTTER  # タスクブロックを置くエリアの左端位置（時刻ラベル分の余白）を設定する
         area_w = width - area_left - theme.CAL_BLOCK_GAP  # タスクブロックを置けるエリアの横幅を計算する
         lane_w = area_w / lane_count  # 1 レーンあたりの幅を計算する
-        for row in task_rows:  # タスク行を 1 件ずつループして
-            self._draw_task_block(cv, row, y_of, lanes[row.task.id], lane_w, area_left)  # 各タスクのカードブロックを Canvas に描く
+        for entry in task_rows:  # タスク行（行 + Task の組）を 1 件ずつループして
+            self._draw_task_block(cv, entry, y_of, lanes[entry.task.id], lane_w, area_left)  # 各タスクのカードブロックを Canvas に描く
 
         self._draw_now_line(cv, now, window_start, window_end, y_of, width)  # 現在時刻を示す now ラインを描く
 
@@ -823,11 +823,11 @@ class PlannerApp:
             t += datetime.timedelta(hours=1)  # 次の正時に進む
 
     @staticmethod
-    def _assign_lanes(task_rows: list[TimelineRow], min_visual_minutes: float = 0.0) -> dict[str, int]:
+    def _assign_lanes(task_rows: list[ScheduledRow], min_visual_minutes: float = 0.0) -> dict[str, int]:
         """重なり合うタスクを横レーンに割り当てる（task.id → レーン番号）。
 
         Args:
-            task_rows: レーンを割り当てるタスク行。
+            task_rows: レーンを割り当てるタスク行（行と Task の組）。
             min_visual_minutes: 描画上の最低高さ（theme.CAL_MIN_BLOCK_HEIGHT）を
                 「分」に換算した値。実所要時間がこれより短いタスクは見た目上
                 この長さぶん描画されるため、レーンの重なり判定にも同じ長さを
@@ -837,18 +837,19 @@ class PlannerApp:
         lanes: dict[str, int] = {}  # タスク ID → レーン番号の対応辞書を初期化する
         min_gap = datetime.timedelta(minutes=min_visual_minutes)  # 最低高さを timedelta に変換する
         active: list[tuple] = []  # (見た目の終了 datetime, lane) 現在進行中のタスクリストを初期化する
-        for row in sorted(task_rows, key=lambda r: r.start):  # タスクを開始時刻の早い順に処理する
+        for entry in sorted(task_rows, key=lambda e: e.row.start):  # タスクを開始時刻の早い順に処理する
+            row = entry.row  # 開始・終了時刻を読むために元のタイムライン行を取り出す
             visual_end = max(row.end, row.start + min_gap)  # 実終了時刻と最低高さ換算の終了時刻の遅い方を「見た目の終了」とする
             used = {lane for end, lane in active if end > row.start}  # このタスクと見た目上重なっているレーン番号の集合を取得する
             active = [(end, lane) for end, lane in active if end > row.start]  # 見た目上終了済みのタスクをアクティブリストから除去する
             lane = 0  # 最小のレーン番号 0 から探す
             while lane in used:  # そのレーンが使用中なら
                 lane += 1  # 次のレーン番号を試す
-            lanes[row.task.id] = lane  # このタスクのレーン番号を確定して記録する
+            lanes[entry.task.id] = lane  # このタスクのレーン番号を確定して記録する
             active.append((visual_end, lane))  # 見た目の終了時刻とレーン番号をアクティブリストに追加する
         return lanes  # タスク ID → レーン番号の辞書を返す
 
-    def _draw_task_block(self, cv: tk.Canvas, row: TimelineRow,
+    def _draw_task_block(self, cv: tk.Canvas, entry: ScheduledRow,
                          y_of: Callable[[datetime.datetime], float], lane: int,
                          lane_w: float, area_left: float) -> None:
         """1 件のタスクを Any Planner 風のカードとして描く。
@@ -856,7 +857,8 @@ class PlannerApp:
         左端にカテゴリ色のストライプ、その右に丸いチェックボックス（完了は ✓ 入り）、
         さらに右にタイトルと時刻を置く。クリック判定用の座標を記録する。
         """
-        task = row.task  # このブロックに対応するタスクオブジェクトを取得する
+        row = entry.row  # 開始・終了時刻や状態を読むために元のタイムライン行を取り出す
+        task = entry.task  # このブロックに対応するタスクオブジェクトを取得する
         y0 = y_of(row.start)  # タスク開始時刻の y 座標を計算する
         y1 = max(y_of(row.end), y0 + theme.CAL_MIN_BLOCK_HEIGHT)  # 最低限の高さを確保（レーン割り当てもこの値を共有する）
         # レーンが狭いと固定隙間 CAL_BLOCK_GAP では幅が負になり消えるため、

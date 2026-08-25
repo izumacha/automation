@@ -10,6 +10,7 @@ from reminder.timeline import (
     STATUS_NOW,
     STATUS_PAST,
     STATUS_UPCOMING,
+    TimelineRow,
     backlog_tasks,
     build_day_timeline,
     carry_over_overdue,
@@ -21,6 +22,7 @@ from reminder.timeline import (
     min_to_hhmm,
     planner_day,
     prune_old_completed,
+    scheduled_rows,
     suggest_for_free_time,
 )
 
@@ -490,6 +492,44 @@ class PruneCompletedTests(unittest.TestCase):
                     completed=True, completed_at="2026-06-07T00:30:00")]
         kept = prune_old_completed(tasks, today, 9 * 60, 1 * 60)
         self.assertEqual([t.title for t in kept], ["当日深夜完了"])
+
+
+class ScheduledRowTests(unittest.TestCase):
+    """scheduled_rows（タスク行と Task の組み直し）の単体テスト。
+
+    描画側（reminder.app）はこの関数の戻り値だけを見てカードを描くため、
+    「何を残し・何を落とすか」と「元の並び順を保つか」をここで固定する。
+    """
+
+    def test_keeps_only_task_rows_in_order(self):
+        # 空き時間行を挟んだタスク行が、順番どおりに Task と対で返ることを確かめる
+        rows = build_day_timeline(
+            [_t("朝会", "2026-06-06T09:00:00", 30), _t("資料作成", "2026-06-06T11:00:00", 60)],
+            datetime.date(2026, 6, 6),
+            now=datetime.datetime(2026, 6, 6, 8, 0),
+        )
+        entries = scheduled_rows(rows)
+        # 空き時間行は落ち、タスク行だけが開始時刻順に並ぶ
+        self.assertEqual([e.task.title for e in entries], ["朝会", "資料作成"])
+        # 組の row 側は元のタスク行そのもの（開始時刻が一致する）
+        self.assertEqual([e.row.start.hour for e in entries], [9, 11])
+        # 全要素が ROW_TASK 由来であることを確かめる
+        self.assertTrue(all(e.row.kind == ROW_TASK for e in entries))
+
+    def test_drops_free_rows(self):
+        # 空き時間行しか無い（タスクが 1 件も無い）日は空リストになる
+        rows = build_day_timeline(
+            [], datetime.date(2026, 6, 6), now=datetime.datetime(2026, 6, 6, 8, 0)
+        )
+        self.assertTrue(any(r.kind == ROW_FREE for r in rows))
+        self.assertEqual(scheduled_rows(rows), [])
+
+    def test_drops_task_row_without_task(self):
+        # task が欠けたタスク行は安全側に倒して除外する（描画側で None を掴ませない）。
+        # 通常の build_day_timeline はこの形の行を作らないので直接組み立てて検証する
+        moment = datetime.datetime(2026, 6, 6, 9, 0)
+        broken = TimelineRow(ROW_TASK, moment, moment + datetime.timedelta(minutes=30), 30, task=None)
+        self.assertEqual(scheduled_rows([broken]), [])
 
 
 if __name__ == "__main__":

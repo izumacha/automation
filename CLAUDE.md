@@ -29,7 +29,9 @@ mypy                                     # 型検査（対象は pyproject.toml 
 
 上の `pytest` / `ruff check .` / `mypy` の 3 つが CI（`.github/workflows/ci.yml` の `test` / `quality` ジョブ）と同じ検証コマンドで、§14 が言う「PR 前に通すローカル検証コマンド」はこの 3 つを指す。
 
-mypy は `reminder/` 全体を既定で検査し、除外は `[tool.mypy.overrides]` に明示する **denylist 方式**（新規モジュールを列挙へ足し忘れて黙って検査対象外になるのを防ぐため）。現在の除外は `reminder.app` のみで、その理由と解除条件は `pyproject.toml` の該当コメントに書いてある。
+mypy は `reminder/` 全体を既定で検査し、除外は `[tool.mypy.overrides]` に明示する **denylist 方式**（新規モジュールを列挙へ足し忘れて黙って検査対象外になるのを防ぐため）。**現在、自リポジトリのモジュールに除外は無い**（`reminder/` 配下は `app.py` を含めて全モジュールが検査対象）。残る override は型スタブを持たないオプション依存 `cairosvg` の import 解決のみ。
+
+以前は `reminder.app` を `ignore_errors` で丸ごと外していたが、原因だった 16 件のエラーは `timeline.ScheduledRow`（タスク行と `Task` を対にして「ROW_TASK の行には必ず Task がある」という不変条件を型に載せるデータ構造）の導入で解消済み。**モジュールを除外へ追加するのは最後の手段**とし、まず型で不変条件を表せないか検討する。
 
 ## 3. アーキテクチャ
 

@@ -73,6 +73,46 @@ class TimelineRow:
     status: str = ""
 
 
+@dataclass(frozen=True)
+class ScheduledRow:
+    """タスク行（ROW_TASK）と、その行が指す Task を対にしたもの。
+
+    ``TimelineRow.task`` は「空き時間行（ROW_FREE）では中身が無い」という理由で
+    ``Task | None`` になっているが、``kind == ROW_TASK`` の行では必ず Task が入る。
+    この不変条件は ``TimelineRow`` の型だけでは表せないため、``[r for r in rows
+    if r.kind == ROW_TASK and r.task is not None]`` のように絞り込んでも、
+    要素の型は ``TimelineRow`` のままで ``r.task`` は ``Task | None`` に戻ってしまう。
+    その結果、描画側は ``row.task`` を触るたびに型チェッカへ「None ではない」と
+    伝え直す必要があり、実際 ``reminder.app`` は丸ごと mypy の対象外にされていた。
+
+    絞り込みの結果を「行 + None でない Task」の組として持ち直すことで、
+    不変条件を型に載せ、以降は ``task`` を常に ``Task`` として扱えるようにする。
+    GUI 非依存の純粋なデータ構造としてここに置き、表示層を差し替えても
+    同じ絞り込みを使い回せるようにしている。
+    """
+
+    row: TimelineRow  # 元のタイムライン行（開始・終了・状態などはここから読む）
+    task: Task  # その行が指すタスク（None にはならない）
+
+
+def scheduled_rows(rows: list[TimelineRow]) -> list[ScheduledRow]:
+    """タイムライン行からタスク行だけを取り出し、Task と対にして返す。
+
+    空き時間行（ROW_FREE）と、万一 task が欠けたタスク行は除外する。
+    後者を弾くのは安全側に倒すためで、描画側が None を掴んでクラッシュする代わりに
+    その 1 行だけが表示から落ちる（§9 fail-safe）。
+
+    Args:
+        rows: build_day_timeline が返したタイムライン行。
+
+    Returns:
+        タスク行と Task の組のリスト（元の並び順を保つ）。
+    """
+    return [ScheduledRow(row=r, task=r.task)  # 行と Task を対にして持ち直す（以降 task は Task 型に確定する）
+            for r in rows
+            if r.kind == ROW_TASK and r.task is not None]  # タスク行かつ Task を持つ行だけを残す
+
+
 def day_bounds(
     date: datetime.date, wake_min: int, sleep_min: int
 ) -> tuple[datetime.datetime, datetime.datetime]:
