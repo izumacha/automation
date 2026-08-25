@@ -29,7 +29,11 @@ mypy                                     # 型検査（対象は pyproject.toml 
 
 上の `pytest` / `ruff check .` / `mypy` の 3 つが CI（`.github/workflows/ci.yml` の `test` / `quality` ジョブ）と同じ検証コマンドで、§14 が言う「PR 前に通すローカル検証コマンド」はこの 3 つを指す。
 
-mypy は `reminder/` 全体を既定で検査し、除外は `[tool.mypy.overrides]` に明示する **denylist 方式**（新規モジュールを列挙へ足し忘れて黙って検査対象外になるのを防ぐため）。現在の除外は `reminder.app` のみで、その理由と解除条件は `pyproject.toml` の該当コメントに書いてある。
+mypy は `reminder/` 全体を既定で検査し、除外は `[tool.mypy.overrides]` に明示する **denylist 方式**（新規モジュールを列挙へ足し忘れて黙って検査対象外になるのを防ぐため）。**現在、自リポジトリのモジュールに除外は無い**（`reminder/` 配下は `app.py` を含めて全モジュールが検査対象）。残る override は型スタブを持たないオプション依存 `cairosvg` の import 解決のみ。
+
+以前は `reminder.app` を `ignore_errors` で丸ごと外していたが、原因だった 16 件のエラーは `timeline.ScheduledRow`（「`ROW_TASK` の行には必ず `Task` がある」という不変条件を型に載せた読み取り専用ビュー）の導入で解消済み。**モジュールを除外へ追加するのは最後の手段**とし、まず型で不変条件を表せないか検討する。
+
+この 16 件を外していた当時のコメントは、内訳を「15 件は自力で修正可能／1 件は tkinter スタブ由来の**偽陽性**で上流の typeshed 待ち」と切り分けていたが、**この診断は誤りだった**。偽陽性とされた `Canvas.create_text` の `call-overload` は、同じ行の `tags=("task", task.id)` で `task` が `Task | None` だったために `task.id` が `str | Any` へ落ち、`tags` が `tuple[str, str | Any]` になって overload 解決に失敗していたもの。残り 15 件と同じ根本原因のとばっちりで、根本を直した時点で一緒に消えた（`disable_error_code` も `# type: ignore` も 1 つも要らなかった）。**「スタブ側の偽陽性」と判断する前に、その行へ渡している値の型が自分のコード側で緩んでいないかを先に疑うこと。**
 
 ## 3. アーキテクチャ
 

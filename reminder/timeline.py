@@ -8,9 +8,21 @@ Any Planner のように「1 日のタスクを時間軸で可視化」するた
 from __future__ import annotations
 
 import datetime
+import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .task import ISO_FMT, Task
+
+# このモジュール専用のロガー。
+# リポジトリの他モジュール（config.py / app.py）は logging.warning(...) でルートロガーへ
+# 直接出しているが、ここだけ名前付きロガーにしている。timeline.py は CLAUDE.md §10 が
+# 「Web/スマホ版と共有する移植可能な中核」と位置づける純粋ロジック側で、ライブラリとして
+# 他アプリに読み込まれうる。ルートロガーへ直接出すと、ロギング未設定のホストで
+# logging.warning() が暗黙に basicConfig() を呼び、ホストが要求していない StreamHandler と
+# WARNING レベルを root へ足してしまう（実測で確認）。名前付きロガーなら出力先とレベルの
+# 決定権をホストに残せる。他モジュールを移行するなら別変更としてまとめて行う。
+logger = logging.getLogger(__name__)
 
 # タイムライン行の種別
 ROW_TASK = "task"
@@ -71,6 +83,125 @@ class TimelineRow:
     minutes: int
     task: Task | None = None
     status: str = ""
+
+
+@dataclass(frozen=True, eq=False)
+class ScheduledRow:
+    """タスク行（ROW_TASK）を「Task が必ずある」形で表した読み取り専用のビュー。
+
+    ``TimelineRow.task`` は「空き時間行（ROW_FREE）では中身が無い」という理由で
+    ``Task | None`` になっているが、``kind == ROW_TASK`` の行では必ず Task が入る。
+    この不変条件は ``TimelineRow`` の型だけでは表せないため、``[r for r in rows
+    if r.kind == ROW_TASK and r.task is not None]`` のように絞り込んでも、
+    要素の型は ``TimelineRow`` のままで ``r.task`` は ``Task | None`` に戻ってしまう。
+    その結果、描画側は ``row.task`` を触るたびに型チェッカへ「None ではない」と
+    伝え直す必要があり、実際 ``reminder.app`` は丸ごと mypy の対象外にされていた。
+
+    元の ``TimelineRow`` を抱えずに必要な値だけを写し取るのは、**同じ Task を指す
+    フィールドを 2 つ持たないため**。``row`` と ``task`` を並べて持つ形だと
+    ``row.task`` と ``task`` という 2 つの経路が同じものを指し、``ScheduledRow(row=A の行,
+    task=B のタスク)`` のように食い違わせても何も検査されない。写し取る形なら
+    Task の経路は 1 つだけになり、この食い違いは起こりようがなくなる。
+
+    ただし**「時間帯とタスクの不一致」自体を防げるわけではない**（誤解しやすいので
+    明記する）: ``start`` / ``end`` は ``task.due`` から導出されるのではなく独立に
+    渡すので、``ScheduledRow(start=A の開始, ..., task=B)`` は今の形でも作れてしまう。
+    それを防ぎたいなら ``task`` から時刻を導出するか ``__post_init__`` で突き合わせる
+    必要があり、本クラスはそこまではやっていない。**このクラスは公開 API なので
+    「生成経路は scheduled_rows だけ」とは言えない**（戻り値を型注釈で名指しできる
+    ようにするために公開しており、外部から直接組み立てることもできる）。
+    パッケージ内での生成は ``scheduled_rows`` に限られ、そこは ``TimelineRow`` の
+    1 行から 4 つの値を写すので不一致は起きない、というのが現状の根拠。
+    外部が直接組み立てる場合の整合は呼び出し側の責任になる。
+
+    ``eq=False``（同一性で比較・ハッシュする）にしているのは、値としての等価を
+    名乗ると **可変な Task を抱えた辞書キー**になってしまうため。``Task`` は完了操作や
+    ``carry_over_overdue`` が ``completed`` / ``due`` を書き換える可変 dataclass なので、
+    値等価だと「辞書へ入れた後にタスクが変化すると、同じ内容で作り直したキーで
+    引けなくなる」典型的な壊れ方をする。さらに自動生成のハッシュは全フィールドを
+    ``hash()`` に掛けるため、可変な ``Task`` を含むこのクラスは実行時 unhashable に
+    なる一方、**mypy は frozen dataclass を hashable とみなす**（＝``set(entries)`` が
+    型検査を素通りして実行時にだけ落ちる、この PR が潰そうとしている形の乖離）。
+    同一性比較なら型と実行時が一致し、タスクが変化してもキーとして引けるままになる。
+    値で比べたい場面は今のところ無く（レーン割り当ては ``task.id`` をキーにしている）、
+    必要になったら比べたい軸を明示して足す。
+
+    公開 API としての帰結（呼び出し側向け）: 同一性比較なので、同じ入力で 2 回
+    ``scheduled_rows`` を呼んだ結果どうしは **等しくならない**
+    （``scheduled_rows(rows) == scheduled_rows(rows)`` は False、``set`` に入れても
+    畳まれない）。「前回の描画結果と同じなら再描画をスキップする」といった
+    値比較をしたい場合は、比べたい軸を自分で取り出して比較する
+    （例: ``[(e.start, e.end, e.status, e.task.id) for e in entries]``）。
+
+    将来案: 根本原因は ``TimelineRow`` が ``kind`` の値で意味の変わる弱い型である
+    こと自体で、本クラスはその上に被せた回避策にすぎない。``rows`` を直接なめる
+    他の消費者（``free_minutes_today`` / ``max_free_slot``、CLAUDE.md §10 が想定する
+    Web・スマホ版）には ``Task | None`` が残るため、新しい消費者が ``row.task`` を
+    触れば同じ問題が再発する。``TaskRow`` / ``FreeRow`` の 2 型 + tagged union へ
+    割るのが本筋だが、全消費者とテストに波及するため別変更として切り出す。
+
+    GUI 非依存の純粋なデータ構造としてここに置き、表示層を差し替えても
+    同じ絞り込みを使い回せるようにしている。
+    """
+
+    start: datetime.datetime  # タスクの開始日時（元の TimelineRow から写す）
+    end: datetime.datetime  # タスクの終了日時（開始 + 所要時間）
+    status: str  # タスク行の状態（STATUS_DONE / NOW / PAST / UPCOMING）
+    task: Task  # その行が指すタスク（None にはならない）
+
+
+def scheduled_rows(rows: Sequence[TimelineRow]) -> list[ScheduledRow]:
+    """タイムライン行からタスク行だけを取り出し、Task 込みのビューにして返す。
+
+    空き時間行（ROW_FREE）は当然除外し、万一 task が欠けたタスク行も除外する。
+    後者を弾くのは安全側に倒すためで、描画側が None を掴んでクラッシュする代わりに
+    その 1 行だけが表示から落ちる（§9 fail-safe）。ただし黙って捨てると、予定が
+    デイビューから消えても手がかりが何も残らない（統計・空き時間計算は別経路を
+    通るため数字だけは合ってしまい、かえって気づきにくい）ので警告ログを残す
+    （§6 エラーを握り潰さない）。
+
+    戻り値は入力の並び順をそのまま保つ。この順序は描画順 →
+    ``PlannerApp._tl_blocks`` の順序 → クリック判定の「最前面優先」に直結するため、
+    ここで並べ替えてはいけない。
+
+    Args:
+        rows: build_day_timeline が返したタイムライン行（読み取るだけなので
+            list に限らず tuple 等の Sequence でよい。公開 API なので、
+            呼び出し側に list() のコピーを強いないよう広く受ける）。
+
+    Returns:
+        タスク行のビューのリスト（入力の並び順を保つ）。
+    """
+    entries: list[ScheduledRow] = []  # 組み直した結果を溜めるリストを初期化する
+    dropped = 0  # この呼び出しで捨てたタスク行の件数を数える
+    for row in rows:  # タイムライン行を先頭から順に見る（並び順をそのまま保つ）
+        if row.kind != ROW_TASK:  # 空き時間行は対象外なので
+            continue  # 何もせず次の行へ進む
+        if row.task is None:  # タスク行なのに Task が欠けている（本来ありえない）場合
+            dropped += 1  # 捨てた件数を 1 増やす（ログは走査後にまとめて 1 行出す）
+            continue  # 描画側へ None を渡さないようこの行は落とす
+        # ここまで来れば row.task は Task 型に確定しているので、必要な値を写し取る
+        entries.append(ScheduledRow(start=row.start, end=row.end, status=row.status, task=row.task))
+
+    if dropped:  # 1 件でも捨てていたら、その事実を記録に残す（§6 エラーを握り潰さない）
+        # 件数だけを出し、タスク名や時刻は載せない（利用者の予定内容をログへ写さないため）。
+        # 再描画のたびに呼ばれる関数なので、この状態に陥れば同じ警告が繰り返し出る。
+        # 初回だけ warning に落とす抑制は、次の 2 つの理由で入れていない:
+        #   1. このパッケージ内から到達する経路は無い。build_day_timeline が
+        #      TimelineRow の唯一の生成元で、ROW_TASK には必ず task を渡すため、
+        #      アプリ内で鳴るときは build_day_timeline 側が壊れている＝繰り返し
+        #      鳴ってほしい状況になる。
+        #   2. TimelineRow と scheduled_rows は公開 API なので、外部の呼び出し元
+        #      （CLAUDE.md §10 が想定する Web/スマホ版）が task=None の ROW_TASK 行を
+        #      自分で組み立てて渡せば到達しうる。ただしそれは契約違反の入力であり、
+        #      呼び出しごとに知らせるのが正しい。うるさければ、このモジュールの
+        #      名前付きロガー（reminder.timeline）のレベルを呼び出し側で下げられる
+        #      — ルートロガーではなく名前付きにしてある理由の 1 つがこれ。
+        # 抑制のためにモジュール変数を持つと、純粋関数として保つと決めているこのモジュール
+        # （CLAUDE.md §3 / 付録 B）に唯一の可変状態が入り、呼び出し順で結果が変わってしまう
+        logger.warning("タスク行に Task がありません。%d 件を表示から除外しました。", dropped)
+
+    return entries  # 入力順を保ったタスク行ビューのリストを返す
 
 
 def day_bounds(

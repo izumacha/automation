@@ -113,29 +113,25 @@ platform = "linux"
 # 下の overrides に理由付きで明示する必要が生じる（fail-closed）。
 files = ["reminder"]
 warn_unused_ignores = true       # 不要になった # type: ignore を検出して腐敗を防ぐ
+# 注釈が 1 つも無い関数の「中身」も検査する。mypy の既定は、引数にも戻り値にも注釈が無い
+# 関数の本体を丸ごと飛ばす（＝中に型エラーを書いても素通りする）。
+# 現時点で reminder/ にそういう関数は無い（app.py の _on_timeline_resize /
+# _on_timeline_click / _rounded_rect や __init__.py の __getattr__ は引数か戻り値の
+# どちらかに注釈があるため、既定でも本体は検査されている。実測で確認済み）。
+# つまりこの設定は今の検出結果を変えないが、`def f(a, b):` を新しく足したときに
+# その本体が無警告で検査対象外になるのを防ぐ fail-closed の保険として有効にしておく
+# （検査対象をモジュール単位で fail-closed にしている denylist 方式と同じ考え方）。
+check_untyped_defs = true
 warn_redundant_casts = true      # 意味のない cast() を検出
 no_implicit_optional = true      # 既定値 None の引数に暗黙の Optional を付けない（明示を強制）
 # 注: ignore_missing_imports はグローバルには有効にしない。全体に効かせると、
 #     将来スタブが要る依存を足したときに「型が付いていない」ことを黙って握り潰すため。
 #     スタブが無い依存は下の overrides でモジュール単位に限定して許可する。
 
-# app.py（PlannerApp の描画・イベント処理）だけを検査対象から外す。
-# 外した理由を正確に書いておく。ここを消すと現状 16 件のエラーが出るが、
-# その内訳は 1 件と 15 件で性質がまったく違う:
-#   - 1 件は tkinter スタブ由来の偽陽性（Canvas.create_text の overload 不一致）。
-#     上流の typeshed が直らない限りこちらでは消せない。
-#   - 15 件は本リポジトリ自身のコードで直せるもので、_render_calendar() の
-#     `task_rows = [r for r in rows if ... and r.task is not None]` を mypy が
-#     追えず、以降 row.task が Task | None のまま扱われることに由来する
-#     （TimelineRow と Task を組にして返すなどの小さな整理で解消できる見込み）。
-# つまり「上流待ち」ではなく「こちらの宿題」が大半なので、外したままにせず、
-# 別 PR で 15 件を解消 →（残る 1 件は disable_error_code で個別に落として）
-# app.py も検査対象へ戻す。その時点でこの overrides ごと削除する。
-[[tool.mypy.overrides]]
-module = [
-  "reminder.app",             # tkinter ウィジェット・Canvas 描画
-]
-ignore_errors = true
+# 注: 自リポジトリのモジュールに除外は無い（reminder/ は app.py を含め全モジュールが対象）。
+#     下の cairosvg が唯一の overrides で、これは import 解決の許可であって
+#     エラーの無視ではない。**モジュールを ignore_errors で外すのは最後の手段**とし、
+#     まず型で不変条件を表せないかを検討する（実例と経緯は CLAUDE.md §2 に集約）。
 
 # cairosvg は型スタブを提供していないオプション依存で、quality ジョブでは
 # インストールもされない（requirements-dev.txt に無い）。この 1 モジュールに限って

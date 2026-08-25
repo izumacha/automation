@@ -23,6 +23,7 @@ import os
 import tkinter as tk
 from collections.abc import Callable
 from tkinter import messagebox, ttk
+from typing import NamedTuple
 
 from . import theme
 from .config import (
@@ -68,11 +69,10 @@ from .time_utils import (
 from .timeline import (
     DEFAULT_SLEEP_MIN,
     DEFAULT_WAKE_MIN,
-    ROW_TASK,
     STATUS_DONE,
     STATUS_NOW,
     STATUS_PAST,
-    TimelineRow,
+    ScheduledRow,
     backlog_tasks,
     build_day_timeline,
     carry_over_overdue,
@@ -83,10 +83,31 @@ from .timeline import (
     min_to_hhmm,
     planner_day,
     prune_old_completed,
+    scheduled_rows,
     suggest_for_free_time,
 )
 
 _WEEKDAY_JA = ("月", "火", "水", "木", "金", "土", "日")
+
+
+class _TimelineBlock(NamedTuple):
+    """クリック判定用に 1 ブロックぶん控える情報。
+
+    生成側（_draw_task_block）と消費側（_on_timeline_click）が同じ並びを共有して
+    いることを型で示し、片方だけ並びを変えたときに mypy が気付けるようにする。
+    素の tuple 別名ではなく NamedTuple にしているのは、読み出し側が b[3] / b[5] の
+    ような添字ではなく b.y1 / b.task_id と名前で読めるようにするため。
+    テストは mypy の検査対象外（pyproject の files = ["reminder"]）なので、
+    添字のままだと並びを変えたときテスト側は実行時まで気付けない（§6 マジックナンバーを避ける）。
+    """
+
+    x0: float  # ブロック左端の x 座標
+    y0: float  # ブロック上端の y 座標
+    x1: float  # ブロック右端の x 座標
+    y1: float  # ブロック下端の y 座標
+    cb_box: tuple[float, float, float, float]  # チェックボックスの判定領域（左, 上, 右, 下）
+    task_id: str  # このブロックが表すタスクの ID
+    done: bool  # 完了済みかどうか
 
 
 class PlannerApp:
@@ -118,8 +139,15 @@ class PlannerApp:
         # 選択は Treeview ではなく「クリックされたブロックの task.id」で管理する。
         self._tl_selected: str | None = None
         self._tl_width: int = theme.TIMELINE_PANEL_WIDTH  # 初期描画幅はテーマの寸法トークンを使う（<Configure> で実幅に更新する）
-        # クリック判定用のブロック矩形（_render_timeline で毎回作り直す）。
-        self._tl_blocks: list = []
+        # クリック判定用のブロック矩形（_render_timeline で毎回作り直す）。要素の並びは
+        # _TimelineBlock の定義が唯一の真実の源なので、ここでは繰り返さない。
+        # 素の list（= list[Any]）にしないのは _assign_lanes の active と同じ理由で、
+        # 要素の型を書かないと並びの取り違えを mypy が捕まえられないため。
+        # 注釈が守るのは **_TimelineBlock(...) を組み立てる側**（_draw_task_block）で、
+        # 型の違うフィールドを入れ替えると（例: task_id と done）そこで arg-type になる。
+        # 読み出し側は名前アクセスなので、同じ型どうしの入替（例: x1 と y1）は
+        # 型検査を素通りする——そちらは幾何を見るテストが受け持つ
+        self._tl_blocks: list[_TimelineBlock] = []
 
         # 起動時・再描画時の整理（前日以前の完了破棄・未完了の繰り越し）は
         # _refresh() 内の _roll_over() に集約している。
@@ -372,7 +400,7 @@ class PlannerApp:
         body.rowconfigure(0, weight=1)  # Canvas が縦いっぱいに広がるよう行 0 を伸縮させる
         # timeline_tree という名前は後方互換のため踏襲（実体はカレンダー Canvas）。
         self.timeline_tree = tk.Canvas(body, bg=theme.CARD, highlightthickness=0,
-                                       height=theme.CAL_INITIAL_HOURS * theme.HOUR_HEIGHT)  # カレンダーを描く Canvas を作る（初期高さはテーマの初期表示時間数ぶん）
+                                       height=self._initial_canvas_height())  # カレンダーを描く Canvas を作る
         self.timeline_tree.grid(row=0, column=0, sticky="nsew")  # Canvas を四辺いっぱいに配置する
         sb = ttk.Scrollbar(body, orient="vertical", command=self.timeline_tree.yview)  # Canvas の縦スクロールバーを作る
         self.timeline_tree.configure(yscrollcommand=sb.set)  # スクロールバーと Canvas を連動させる
@@ -750,13 +778,13 @@ class PlannerApp:
         """
         cv = self.timeline_tree  # カレンダーを描く Canvas を取得する
         cv.delete("all")  # 前回の描画内容をすべて消去する
-        # クリック判定用（x0,y0,x1,y1, チェックボックス領域, task.id, 完了フラグ）。
-        self._tl_blocks = []  # ブロックのクリック判定情報リストをリセットする
+        # クリック判定用の情報（並びは _TimelineBlock の定義を参照）をリセットする
+        self._tl_blocks = []
         wake_min, sleep_min = self._wake_min(), self._sleep_min()  # 起床・就寝時刻を「分」で取得する
         now = now or self._get_now()  # 引数で現在時刻が渡されなければ _get_now() から取得する（_refresh からは同一時刻が渡される）
 
         rows = build_day_timeline(self.tasks, today, wake_min, sleep_min, now)  # 今日のタイムライン行データを構築する
-        task_rows = [r for r in rows if r.kind == ROW_TASK and r.task is not None]  # タスク行だけを抜き出す
+        task_rows = scheduled_rows(rows)  # タスク行だけを抜き出し、行と Task の組にして受け取る
 
         # 表示ウィンドウ（起床前/就寝後に始まる・終わるタスクも可視範囲に含めた範囲）は
         # build_day_timeline 側で既に計算済みなので、day_start/day_end や個々のタスクから
@@ -768,7 +796,7 @@ class PlannerApp:
         window_start = min(r.start for r in rows)  # 表示ウィンドウの開始時刻(全行中の最小開始)
         window_end = max(r.end for r in rows)  # 表示ウィンドウの終了時刻(全行中の最大終了)
 
-        scale = theme.HOUR_HEIGHT / 60.0  # 1 分あたりのピクセル数を計算する
+        scale = self._px_per_minute()  # 1 分あたりのピクセル数（この描画で使う唯一の換算源）
 
         def y_of(dt: datetime.datetime) -> float:
             return theme.CAL_PAD_TOP + (dt - window_start).total_seconds() / 60.0 * scale  # 日時を Canvas の y 座標（ピクセル）に変換する
@@ -778,23 +806,22 @@ class PlannerApp:
 
         # 描画時に最低高さ（theme.CAL_MIN_BLOCK_HEIGHT px）へクランプされる極端に
         # 短いタスクは、実際の終了時刻より見た目上は長く描かれる。レーン割り当てが
-        # 実時間（row.end）だけで重なりを判定すると、クランプ分だけ隣のタスクと
+        # 実時間（entry.end）だけで重なりを判定すると、クランプ分だけ隣のタスクと
         # 視覚的に重なってしまうため、最低高さを分に換算した「見た目の占有時間」を
         # 加味してレーンを分ける。
-        min_visual_minutes = theme.CAL_MIN_BLOCK_HEIGHT / scale  # 最低高さ（px）を「分」に換算する
-        lanes = self._assign_lanes(task_rows, min_visual_minutes)  # 重なるタスクをレーン（横列）に割り当てる
+        lanes = self._assign_lanes(task_rows, self._min_visual_minutes())  # 重なるタスクをレーン（横列）に割り当てる
         lane_count = (max(lanes.values()) + 1) if lanes else 1  # 必要なレーン数を計算する（最大レーン番号 +1）
         area_left = theme.CAL_GUTTER  # タスクブロックを置くエリアの左端位置（時刻ラベル分の余白）を設定する
         area_w = width - area_left - theme.CAL_BLOCK_GAP  # タスクブロックを置けるエリアの横幅を計算する
         lane_w = area_w / lane_count  # 1 レーンあたりの幅を計算する
-        for row in task_rows:  # タスク行を 1 件ずつループして
-            self._draw_task_block(cv, row, y_of, lanes[row.task.id], lane_w, area_left)  # 各タスクのカードブロックを Canvas に描く
+        for entry in task_rows:  # タスク行（行 + Task の組）を 1 件ずつループして
+            self._draw_task_block(cv, entry, y_of, lanes[entry.task.id], lane_w, area_left)  # 各タスクのカードブロックを Canvas に描く
 
         self._draw_now_line(cv, now, window_start, window_end, y_of, width)  # 現在時刻を示す now ラインを描く
 
         # scrollregion はブロック描画後に確定する。最低高を確保した短いタスクが
         # window_end を超えて伸びても、下端とチェックボックスが見切れないようにする。
-        content_bottom = max([y_of(window_end)] + [b[3] for b in self._tl_blocks])  # 全ブロックの下端と表示ウィンドウ終端（window_end）の遅い方をコンテンツ底辺とする
+        content_bottom = max([y_of(window_end)] + [b.y1 for b in self._tl_blocks])  # 全ブロックの下端と表示ウィンドウ終端（window_end）の遅い方をコンテンツ底辺とする
         height = int(content_bottom + theme.CAL_PAD_TOP)  # 下余白を加えた Canvas 総高さを計算する
         cv.configure(scrollregion=(0, 0, width, height))  # Canvas のスクロール可能領域を確定させる
 
@@ -822,33 +849,94 @@ class PlannerApp:
                                fill=theme.GRID_LINE_HALF)  # 30 分の補助線（薄い罫線）を描く
             t += datetime.timedelta(hours=1)  # 次の正時に進む
 
+    def _px_per_minute(self) -> float:
+        """このアプリが「分 → px」に使う倍率を返す（描画の scale の唯一の源）。
+
+        現状はテーマの固定トークンをそのまま返すだけだが、**表示倍率（ズーム）を
+        入れるならここ 1 か所で掛ける**。インスタンスメソッドにしているのはそのため:
+        描画の scale と、下の _min_visual_minutes()（px→分の逆換算）が必ず同じ倍率を
+        見るようにする。片方だけがズームに追随すると、重なっていない隣接タスクが
+        「重なっている」と判定されてカードが半幅に割れる。
+
+        将来案: _min_visual_minutes() が返す「カードが見た目上占有する分数」は、
+        レーンの重なり判定に使う準ドメイン的な値なので、表示層を差し替えても
+        再利用したいという見方はできる（CLAUDE.md §10）。ただしそれを言うなら
+        _assign_lanes 自体が GUI クラス側にあり、換算だけを theme へ移しても
+        レーン規則は移植可能にならない。移すなら _assign_lanes ごと timeline.py へ
+        出すのが筋で、消費者もテストも広く動くため別変更として切り出す。
+        """
+        # 1 時間あたりの高さ（px）を 60 で割って「1 分あたりのピクセル数」にする
+        return theme.HOUR_HEIGHT / 60.0
+
+    def _initial_canvas_height(self) -> int:
+        """カレンダー Canvas の初期高さ（px）を返す。
+
+        _px_per_minute() を経由して求めるのは、theme.HOUR_HEIGHT を直接掛けると
+        将来ズームを入れたときに描画(scale)とレーン判定だけが倍率に追随して
+        初期高さが取り残され、開いた直後だけ想定の半分の時間しか見えない状態に
+        なるため（_px_per_minute の docstring が防ぐと書いている食い違い）。
+
+        メソッドとして切り出しているのは検証できるようにするため: _build_ui は
+        テストで丸ごとパッチされるので、この式を _build_ui の中に置くと
+        どのテストからも実行されず、丸め方を int() に戻しても誰も気付けない。
+        """
+        # 表示時間数を分に直し、1 分あたりのピクセル数を掛けて px にする。
+        # int() の切り捨てだと px→分→px の往復で 1px 失うことがある
+        # （例: HOUR_HEIGHT=21 で 252 が 251 になる。倍率を掛けると外れる組み合わせが増える）。
+        # 整数どうしの掛け算だった以前の実装と同じ値を保つため round() で丸める
+        return round(theme.CAL_INITIAL_HOURS * 60 * self._px_per_minute())
+
+    def _min_visual_minutes(self) -> float:
+        """描画上の最低高さ（theme.CAL_MIN_BLOCK_HEIGHT px）を「分」に換算して返す。
+
+        1 行の式だがメソッドとして切り出しているのは、この換算が
+        「レーン割り当ての重なり判定に使う見た目の占有時間」という意味を持ち、
+        描画側とテスト側の両方が同じ値を必要とするため。テストが式を書き写すと、
+        本番の換算だけを変えたときにテストが古い値を使い続けて緑のまま通り、
+        実際のカードだけが割れる（§6 定数・式の一元管理）。
+        """
+        # 描画が使うのと同じ倍率で割る（_px_per_minute を経由するのでズームにも追随する）
+        return theme.CAL_MIN_BLOCK_HEIGHT / self._px_per_minute()
+
     @staticmethod
-    def _assign_lanes(task_rows: list[TimelineRow], min_visual_minutes: float = 0.0) -> dict[str, int]:
+    def _assign_lanes(task_rows: list[ScheduledRow], min_visual_minutes: float) -> dict[str, int]:
         """重なり合うタスクを横レーンに割り当てる（task.id → レーン番号）。
 
         Args:
-            task_rows: レーンを割り当てるタスク行。
+            task_rows: レーンを割り当てるタスク行（行と Task の組）。
             min_visual_minutes: 描画上の最低高さ（theme.CAL_MIN_BLOCK_HEIGHT）を
                 「分」に換算した値。実所要時間がこれより短いタスクは見た目上
                 この長さぶん描画されるため、レーンの重なり判定にも同じ長さを
                 加味し、隣接する短時間タスク同士が同じレーンで視覚的に
                 重ならないようにする。
+                **既定値は置かない**: 省略できると 0.0 が使われ、レーン判定だけが
+                クランプを知らないまま「重なっていない」と判断する一方で
+                _draw_task_block は最低高さまで伸ばして描くため、カードが同じレーンで
+                視覚的に重なる（test_short_consecutive_tasks_do_not_visually_overlap が
+                防いでいる回帰そのもの）。必ず _min_visual_minutes() の値を渡す。
         """
         lanes: dict[str, int] = {}  # タスク ID → レーン番号の対応辞書を初期化する
         min_gap = datetime.timedelta(minutes=min_visual_minutes)  # 最低高さを timedelta に変換する
-        active: list[tuple] = []  # (見た目の終了 datetime, lane) 現在進行中のタスクリストを初期化する
-        for row in sorted(task_rows, key=lambda r: r.start):  # タスクを開始時刻の早い順に処理する
-            visual_end = max(row.end, row.start + min_gap)  # 実終了時刻と最低高さ換算の終了時刻の遅い方を「見た目の終了」とする
-            used = {lane for end, lane in active if end > row.start}  # このタスクと見た目上重なっているレーン番号の集合を取得する
-            active = [(end, lane) for end, lane in active if end > row.start]  # 見た目上終了済みのタスクをアクティブリストから除去する
+        # (見た目の終了 datetime, lane) の並び。要素の型を書いておかないと tuple[Any, ...] に
+        # なり、下の `end > entry.start`（datetime 同士の比較）が型検査を素通りしてしまう
+        # ＝ append の順序を入れ替える取り違えを mypy が捕まえられない
+        active: list[tuple[datetime.datetime, int]] = []  # 現在進行中のタスクリストを初期化する
+        for entry in sorted(task_rows, key=lambda e: e.start):  # タスクを開始時刻の早い順に処理する
+            visual_end = max(entry.end, entry.start + min_gap)  # 実終了時刻と最低高さ換算の終了時刻の遅い方を「見た目の終了」とする
+            # 先に「見た目上まだ終わっていない」ものだけを残し、その lane 集合をそのまま
+            # 使用中レーンとして扱う。以前は同じ条件（end > entry.start）を used 用と
+            # active 用に 2 回書いており、片方だけ条件を直すと used と active が食い違って
+            # レーン割り当てが静かに崩れる（重なるカードが同じレーンに乗る／不要にレーンが増える）
+            active = [(end, lane) for end, lane in active if end > entry.start]  # 見た目上終了済みのタスクをアクティブリストから除去する
+            used = {lane for _, lane in active}  # 残ったもの＝このタスクと見た目上重なっているレーン番号の集合
             lane = 0  # 最小のレーン番号 0 から探す
             while lane in used:  # そのレーンが使用中なら
                 lane += 1  # 次のレーン番号を試す
-            lanes[row.task.id] = lane  # このタスクのレーン番号を確定して記録する
+            lanes[entry.task.id] = lane  # このタスクのレーン番号を確定して記録する
             active.append((visual_end, lane))  # 見た目の終了時刻とレーン番号をアクティブリストに追加する
         return lanes  # タスク ID → レーン番号の辞書を返す
 
-    def _draw_task_block(self, cv: tk.Canvas, row: TimelineRow,
+    def _draw_task_block(self, cv: tk.Canvas, entry: ScheduledRow,
                          y_of: Callable[[datetime.datetime], float], lane: int,
                          lane_w: float, area_left: float) -> None:
         """1 件のタスクを Any Planner 風のカードとして描く。
@@ -856,16 +944,16 @@ class PlannerApp:
         左端にカテゴリ色のストライプ、その右に丸いチェックボックス（完了は ✓ 入り）、
         さらに右にタイトルと時刻を置く。クリック判定用の座標を記録する。
         """
-        task = row.task  # このブロックに対応するタスクオブジェクトを取得する
-        y0 = y_of(row.start)  # タスク開始時刻の y 座標を計算する
-        y1 = max(y_of(row.end), y0 + theme.CAL_MIN_BLOCK_HEIGHT)  # 最低限の高さを確保（レーン割り当てもこの値を共有する）
+        task = entry.task  # このブロックに対応するタスクオブジェクトを取得する
+        y0 = y_of(entry.start)  # タスク開始時刻の y 座標を計算する
+        y1 = max(y_of(entry.end), y0 + theme.CAL_MIN_BLOCK_HEIGHT)  # 最低限の高さを確保（レーン割り当てもこの値を共有する）
         # レーンが狭いと固定隙間 CAL_BLOCK_GAP では幅が負になり消えるため、
         # 隙間はレーン幅の一定割合までに抑えてブロック幅を必ず正に保つ。
         gap = min(theme.CAL_BLOCK_GAP, lane_w * theme.CAL_BLOCK_GAP_MAX_RATIO)  # レーン幅に応じて詰めた左右の隙間（px）
         x0 = area_left + lane * lane_w + gap  # ブロック左端の x 座標を計算する（レーン位置と隙間から）
         x1 = area_left + (lane + 1) * lane_w - gap  # ブロック右端の x 座標を計算する
 
-        fill, accent, text_color = self._block_colors(task, row.status)  # タスクの状態（完了・進行中・過去など）に応じた配色を取得する
+        fill, accent, text_color = self._block_colors(task, entry.status)  # タスクの状態（完了・進行中・過去など）に応じた配色を取得する
         is_selected = task.id == self._tl_selected  # このタスクが現在選択中かどうかを判定する
         outline = theme.BRAND_DARK if is_selected else theme.BORDER  # 選択中なら強調色、それ以外は通常の枠色を使う
         ow = theme.CAL_SELECT_OUTLINE_W if is_selected else theme.CAL_OUTLINE_W  # 選択中は枠線を太く、それ以外は細くする（太さはテーマの寸法トークン）
@@ -878,7 +966,7 @@ class PlannerApp:
                            tags=("task", task.id))  # カードの左端にカテゴリ色のストライプを描く
 
         tall = (y1 - y0) >= theme.CAL_MIN_TEXT_HEIGHT  # カードの高さがテキスト表示の最低値以上かどうかを判定する
-        done = row.status == STATUS_DONE  # このタスクが完了済みかどうかを判定する
+        done = entry.status == STATUS_DONE  # このタスクが完了済みかどうかを判定する
         # 丸いチェックボックス（未完了＝枠線のみ / 完了＝塗り＋✓）。
         r = theme.CAL_CHECK_R  # チェックボックスの半径をテーマ定数から取得する
         # チェックボックスの中心 x 座標（本来はストライプ右隣の固定オフセット）。
@@ -912,7 +1000,7 @@ class PlannerApp:
             cv.create_oval(cb_cx - r, cb_cy - r, cb_cx + r, cb_cy + r,
                            outline=accent, width=theme.CAL_CHECK_OUTLINE_W, tags=("task", task.id))  # 枠線だけの円（空のチェックボックス）を描く（枠線の太さはテーマのトークン）
 
-        self._tl_blocks.append((x0, y0, x1, y1, cb_box, task.id, done))  # クリック判定情報をリストに追加する
+        self._tl_blocks.append(_TimelineBlock(x0, y0, x1, y1, cb_box, task.id, done))  # クリック判定情報をリストに追加する
 
         # タイトル・時刻（チェックボックスの右）。繰り返しタスクは 🔁 を添える
         # （旧タイムラインの「繰り返し」列で示していた情報をカードでも残す）。
@@ -928,7 +1016,7 @@ class PlannerApp:
             cv.create_text(text_x, y0 + theme.CAL_TITLE_PAD_TOP, anchor="nw", text=title, fill=text_color,
                            font=theme.FONT_BOLD, width=text_w, tags=("task", task.id))  # タイトルをカード上部に太字で描く
             cv.create_text(text_x, y1 - theme.CAL_TIME_PAD_BOTTOM, anchor="sw",
-                           text=f"{row.start:%H:%M}–{row.end:%H:%M}", fill=text_color,
+                           text=f"{entry.start:%H:%M}–{entry.end:%H:%M}", fill=text_color,
                            font=theme.FONT_SMALL, tags=("task", task.id))  # 開始〜終了時刻をカード下部に小さく描く
         else:  # カードが低くてテキスト 2 行分の高さがないなら
             cv.create_text(text_x, (y0 + y1) / 2, anchor="w", text=title,
@@ -994,18 +1082,18 @@ class PlannerApp:
         """
         cv = self.timeline_tree  # クリックされたカレンダー Canvas を取得する
         x, y = cv.canvasx(event.x), cv.canvasy(event.y)  # クリック座標をスクロール込みの Canvas 座標に変換する
-        for x0, y0, x1, y1, cb_box, task_id, done in reversed(self._tl_blocks):  # 最前面（後ろに描かれた）ブロックから順に当たり判定をする
-            cbx0, cby0, cbx1, cby1 = cb_box  # チェックボックスの判定領域を取り出す
+        for block in reversed(self._tl_blocks):  # 最前面（後ろに描かれた）ブロックから順に当たり判定をする
+            cbx0, cby0, cbx1, cby1 = block.cb_box  # チェックボックスの判定領域を取り出す
             in_checkbox = cbx0 <= x <= cbx1 and cby0 <= y <= cby1  # クリック位置がチェックボックス内かどうかを判定する
-            in_block = x0 <= x <= x1 and y0 <= y <= y1  # クリック位置がカードブロック内かどうかを判定する
+            in_block = block.x0 <= x <= block.x1 and block.y0 <= y <= block.y1  # クリック位置がカードブロック内かどうかを判定する
             # チェックボックスは（狭いレーンでカード幅をはみ出しても）独立に判定する。
             if not in_checkbox and not in_block:  # チェックボックスにもカードにも当たらなければ
                 continue  # 次のブロックを確認する
-            if not done and in_checkbox:  # 未完了タスクのチェックボックスがクリックされたなら
-                self._tl_selected = task_id  # そのタスクを選択状態にする
-                self._complete(self._find(task_id))  # 内部で再描画される
+            if not block.done and in_checkbox:  # 未完了タスクのチェックボックスがクリックされたなら
+                self._tl_selected = block.task_id  # そのタスクを選択状態にする
+                self._complete(self._find(block.task_id))  # 内部で再描画される
             else:  # カード本体（または完了済みチェックボックス）がクリックされたなら
-                self._tl_selected = None if task_id == self._tl_selected else task_id  # 同じタスクを再クリックで選択解除、別タスクなら選択する
+                self._tl_selected = None if block.task_id == self._tl_selected else block.task_id  # 同じタスクを再クリックで選択解除、別タスクなら選択する
                 self._refresh()  # 選択状態の変化をカレンダーに反映する
             return  # 最前面のブロックを処理したら終了する（後ろのブロックは処理しない）
         if self._tl_selected is not None:  # 余白クリックで選択解除

@@ -1,8 +1,11 @@
 """tests/test_planner.py — PlannerApp（タイムライン版）/ main のテスト
 
-GUI 依存を避けるため _build_ui・_refresh・_schedule_all をパッチして
-ロジック層（タスク追加・完了・削除・あとで⇄予定の移動・通知スケジュール）を検証する。
+GUI 依存を避けるため PlannerApp.__init__ の副作用をパッチして、ロジック層
+（タスク追加・完了・削除・あとで⇄予定の移動・通知スケジュール）を検証する。
+何をパッチするかは AppTestCase._INIT_PATCHED_METHODS が唯一の一覧なので、
+ここには写さない（写すと片方だけ古くなる）。
 """
+import contextlib
 import datetime
 import logging
 import unittest
@@ -14,6 +17,7 @@ from reminder.config import Prefs
 from reminder.recurrence import RECUR_DAILY, RECUR_LABELS
 from reminder.task import DEFAULT_DURATION, ISO_FMT, Task
 from reminder.time_utils import REFRESH_INTERVAL_MS
+from reminder.timeline import STATUS_UPCOMING, ScheduledRow
 
 
 class _DummyVar:
@@ -52,16 +56,60 @@ class AppTestCase(unittest.TestCase):
         self.addCleanup(p.stop)
         return mock
 
+    # PlannerApp.__init__ が「開始時刻欄の自動補完値」を決めるときに見る時刻。
+    # 実時計のままだと _auto_start_default が実行時刻しだいで変わり、テストが
+    # 開始時刻を明示設定したときにその値とたまたま一致して、
+    # _refresh_stale_start_default() が「ユーザーは触っていない」と誤判定する
+    # （＝時間帯によってだけ落ちるテストになる。窓はテストが設定する時刻ごとに
+    #   別々にあり、例えば "09:00" を設定するテストは実時刻 08:55〜08:59 の
+    #   5 分間だけ落ちる）。構築時だけこの固定値を見せて自動補完値を実時計から切り離す。
+    #
+    # 03:33 を選ぶ理由: _default_start により入力欄の初期値が 03:35 で決定的になる。
+    _INIT_NOW = datetime.datetime(2026, 6, 1, 3, 33)
+
+    # 「この値が入力欄に表示されていることはありえない」ことを表す番兵。
+    # _refresh_stale_start_default() が『ユーザーは触っていない』判定に使う
+    # _auto_start_default をこれで潰し、テストの明示設定を常に「編集済み」と扱わせる。
+    # 時と分で違う値にしているのは、時刻欄の境界値テストが書きそうな
+    # "-1" / "0" / "24" / "60" のような単一値と偶然一致しないようにするため
+    # （f"{-97:02d}" は "-97"、f"{-98:02d}" は "-98" になる）。
+    _NEVER_AUTO_FILLED = (-97, -98)
+
+    # PlannerApp.__init__ を GUI 無し・実時計無しで走らせるためにパッチするメソッド名。
+    # ここを唯一の一覧にして、構築経路ごとに書き写さないようにする（書き写すと
+    # 新しいパッチを足したときに片方だけ取り残される。実際 _get_now の追加で
+    # test_init_schedules_periodic_refresh 側が実時計を読んだままになっていた）。
+    # 値は「patch.object へ渡す追加キーワード」。_get_now だけは戻り値を固定したいので
+    # return_value を持たせる（__init__ が実時計を読まないようにするフレーク対策の要）。
+    _INIT_PATCHED_METHODS = {
+        "_build_ui": {},                 # ウィジェット構築（tkinter が要る）
+        "_refresh": {},                  # 初回描画
+        "_schedule_all": {},             # 起動時の通知スケジュール
+        "_schedule_periodic_refresh": {},  # 定期リフレッシュのタイマー登録
+        "_get_now": {"return_value": _INIT_NOW},  # 実時計の読み取り
+    }
+
+    @contextlib.contextmanager
+    def _construction_patches(self, tasks=None, prefs=None, skip=()):
+        """PlannerApp(root) を GUI 無しで構築するためのパッチ束を張る。
+
+        skip に渡したメソッド名だけはパッチせず、本物を実行させる
+        （例: 定期リフレッシュの登録そのものを検証したいテスト）。
+        """
+        with contextlib.ExitStack() as stack:
+            for name, kwargs in self._INIT_PATCHED_METHODS.items():  # 一覧のうち skip 以外をパッチする
+                if name not in skip:
+                    stack.enter_context(patch.object(PlannerApp, name, **kwargs))
+            stack.enter_context(patch("reminder.app.load_tasks", return_value=list(tasks or [])))
+            stack.enter_context(patch("reminder.app.load_prefs", return_value=prefs or Prefs()))
+            stack.enter_context(patch("reminder.app.tk.StringVar",
+                                      side_effect=lambda value="": _DummyVar(value)))
+            yield
+
     def _app(self, tasks=None, prefs=None):
         root = Mock()
         root.after.return_value = "job-1"
-        with patch.object(PlannerApp, "_build_ui"), \
-             patch.object(PlannerApp, "_refresh"), \
-             patch.object(PlannerApp, "_schedule_all"), \
-             patch.object(PlannerApp, "_schedule_periodic_refresh"), \
-             patch("reminder.app.load_tasks", return_value=list(tasks or [])), \
-             patch("reminder.app.load_prefs", return_value=prefs or Prefs()), \
-             patch("reminder.app.tk.StringVar", side_effect=lambda value="": _DummyVar(value)):
+        with self._construction_patches(tasks, prefs):
             app = PlannerApp(root)
         app.timeline_tree = Mock()
         app.timeline_tree.selection.return_value = ()
@@ -70,6 +118,25 @@ class AppTestCase(unittest.TestCase):
         app.backlog_tree.selection.return_value = ()
         app.backlog_tree.get_children.return_value = ()
         app.status_var = _DummyVar()
+        # 実時計への依存を 2 段構えで断つ。
+        # (1) 上の _get_now パッチにより、入力欄の初期値が _INIT_NOW 由来の
+        #     "03"/"35" で決定的になる（実時計を見ない）。
+        # (2) _auto_start_default を、テストが入力しそうにない値へ倒す。
+        #     _refresh_stale_start_default() は「表示文字列 == f"{値:02d}"」で
+        #     『ユーザーは触っていない』を判定する。_default_start は必ず
+        #     0〜23 時・5 分刻みを返すので、負値なら自動補完値と衝突しない。
+        #     これでどんな開始時刻を設定しても「ユーザーが編集した」と扱われ、
+        #     「明示設定した値がたまたま自動補完値と一致して上書きされる」経路が塞がる。
+        # (1) だけだと "03:35" を設定するテストが実時刻 03:30〜03:34 でだけ通る
+        # フレークになり、(2) だけだと入力欄の初期値が実時計由来のまま残る。
+        #
+        # 残る前提: 判定は**表示文字列**の一致なので、番兵と同じ文字列を入力欄へ
+        # 設定するテストを書けば衝突しうる（(-1, -1) だと "-1" を入力する
+        # 境界値テストが該当した）。時刻欄の境界値として書かれうる "-1" / "24" /
+        # "60" などから離れた非対称な値にして、実質的に衝突を起こしようがなくしている。
+        # 自動補完そのものの挙動を検証する 2 件は、_auto_start_default を自分で
+        # 設定し直すため影響を受けない。
+        app._auto_start_default = self._NEVER_AUTO_FILLED
         return app, root
 
 
@@ -227,12 +294,6 @@ class AddToTimelineTests(AppTestCase):
         app, _ = self._app()
         fixed = datetime.datetime(2026, 6, 1, 12, 0)
         app._get_now = lambda: fixed
-        # 回帰修正: _app() はアプリ構築を実時計基準で行うため、_auto_start_default が
-        # たまたま実行時刻の既定値（例: 実行時刻が 9:55〜10:00 なら "10:00"）になっている
-        # ことがある。下で "10:00" を明示的に設定する前に、それと衝突しない値へ
-        # リセットしておかないと、_refresh_stale_start_default() が「未変更」と誤判定して
-        # 上書きしてしまい、実行時刻帯によってテストが不安定になる（既知のフレーキーテスト）
-        app._auto_start_default = (0, 0)
         app.title_var.set("朝活")
         app.hour_var.set("10")
         app.minute_var.set("00")
@@ -266,7 +327,6 @@ class AddToTimelineTests(AppTestCase):
         app, _ = self._app(prefs=Prefs(wake="09:00", sleep="01:00"))  # 夜型レンジの設定でアプリを生成する
         fixed = datetime.datetime(2026, 7, 15, 0, 30)  # 深夜 00:30(プランナー日は前日 7/14)に固定する
         app._get_now = lambda: fixed  # 実時計に依存しないよう現在時刻を固定する
-        app._auto_start_default = (0, 0)  # 既定値の自動更新が入力値を上書きしないようリセットする
         app.title_var.set("朝会の準備")  # タスク名を入力する
         app.hour_var.set("10")  # 開始時刻の「時」を入力する
         app.minute_var.set("00")  # 開始時刻の「分」を入力する
@@ -284,7 +344,6 @@ class AddToTimelineTests(AppTestCase):
         app, _ = self._app(prefs=Prefs(wake="09:00", sleep="01:00"))  # 夜型レンジの設定でアプリを生成する
         fixed = datetime.datetime(2026, 7, 15, 23, 30)  # 夜 23:30(プランナー日は 7/15)に固定する
         app._get_now = lambda: fixed  # 実時計に依存しないよう現在時刻を固定する
-        app._auto_start_default = (0, 0)  # 既定値の自動更新が入力値を上書きしないようリセットする
         app.title_var.set("夜のストレッチ")  # タスク名を入力する
         app.hour_var.set("00")  # 開始時刻の「時」を入力する
         app.minute_var.set("15")  # 開始時刻の「分」を入力する
@@ -494,12 +553,10 @@ class PeriodicRefreshTests(AppTestCase):
         # は他のテストへの副作用を避けるためパッチ済みなのでここでは使わず組み立て直す）
         root = Mock()
         root.after.return_value = "tick-job"
-        with patch.object(PlannerApp, "_build_ui"), \
-             patch.object(PlannerApp, "_refresh"), \
-             patch.object(PlannerApp, "_schedule_all"), \
-             patch("reminder.app.load_tasks", return_value=[]), \
-             patch("reminder.app.load_prefs", return_value=Prefs()), \
-             patch("reminder.app.tk.StringVar", side_effect=lambda value="": _DummyVar(value)):
+        # パッチ束は _app() と共有し、_schedule_periodic_refresh だけ本物を走らせる。
+        # 以前はここでパッチを書き写しており、_app() 側へ足した _get_now の固定が
+        # 反映されず、この経路だけ実時計を読んだままになっていた
+        with self._construction_patches(skip=("_schedule_periodic_refresh",)):
             app = PlannerApp(root)  # 起動時に定期リフレッシュのジョブが登録されることを確認する対象
         # 起動直後に REFRESH_INTERVAL_MS 後の _tick 呼び出しがちょうど 1 件登録されている
         root.after.assert_called_once_with(REFRESH_INTERVAL_MS, app._tick)
@@ -682,11 +739,11 @@ class CalendarRenderTests(AppTestCase):
         task = Task(title="早朝", due=_iso(due), duration_min=30)
         app, _ = self._app([task])
         app._render_timeline(today)
-        blocks = [b for b in app._tl_blocks if b[5] == task.id]
+        blocks = [b for b in app._tl_blocks if b.task_id == task.id]
         self.assertTrue(blocks)  # ブロックが描かれている
-        _x0, y0, _x1, y1, _cb, _tid, _done = blocks[0]
-        self.assertGreaterEqual(y0, 0)   # 負の y に描かれない（見切れない）
-        self.assertGreater(y1, y0)
+        block = blocks[0]
+        self.assertGreaterEqual(block.y0, 0)   # 負の y に描かれない（見切れない）
+        self.assertGreater(block.y1, block.y0)
 
     def test_many_overlapping_tasks_stay_visible(self):
         # 多数のタスクが同時刻に重なり、かつ Canvas 幅が狭いとき（最悪条件）でも
@@ -701,8 +758,8 @@ class CalendarRenderTests(AppTestCase):
         app._tl_width = theme.CAL_GUTTER + 80  # 描画幅を最小幅に固定して最悪条件を再現する
         app._render_timeline(today)
         self.assertEqual(len(app._tl_blocks), len(tasks))  # 全タスクが描画される（欠落しない）
-        for x0, _y0, x1, _y1, _cb, _tid, _done in app._tl_blocks:  # 各ブロックの矩形を検査する
-            self.assertGreater(x1, x0)  # ブロック幅は常に正（反転・ゼロ幅で消えない）
+        for block in app._tl_blocks:  # 各ブロックの矩形を検査する
+            self.assertGreater(block.x1, block.x0)  # ブロック幅は常に正（反転・ゼロ幅で消えない）
 
     def test_checkbox_stays_within_own_block_when_lanes_are_narrow(self):
         # 回帰テスト: チェックボックスの中心 x はストライプ右隣の固定オフセットで
@@ -724,11 +781,11 @@ class CalendarRenderTests(AppTestCase):
         app._render_timeline(today)
         self.assertEqual(len(app._tl_blocks), len(tasks))  # 全タスクが描画される（欠落しない）
         block_x1 = {}  # task.id → ブロック右端(x1) の対応表（後段のテキスト位置検証で使う）
-        for x0, _y0, x1, _y1, cb_box, tid, _done in app._tl_blocks:  # 各ブロックとそのチェックボックス領域を検査する
-            cb_left, _cb_top, cb_right, _cb_bottom = cb_box  # チェックボックスの判定領域の左右端を取り出す
-            self.assertGreaterEqual(cb_left, x0 - 1e-6)  # チェックボックスがブロック左端より内側にあること
-            self.assertLessEqual(cb_right, x1 + 1e-6)  # チェックボックスがブロック右端を超えて隣のレーンへはみ出さないこと
-            block_x1[tid] = x1  # 後段でタイトル文字の描画開始位置と突き合わせるため記録する
+        for block in app._tl_blocks:  # 各ブロックとそのチェックボックス領域を検査する
+            cb_left, _cb_top, cb_right, _cb_bottom = block.cb_box  # チェックボックスの判定領域の左右端を取り出す
+            self.assertGreaterEqual(cb_left, block.x0 - 1e-6)  # チェックボックスがブロック左端より内側にあること
+            self.assertLessEqual(cb_right, block.x1 + 1e-6)  # チェックボックスがブロック右端を超えて隣のレーンへはみ出さないこと
+            block_x1[block.task_id] = block.x1  # 後段でタイトル文字の描画開始位置と突き合わせるため記録する
         # チェックボックス位置をクランプしても、そこからさらに右へオフセットした
         # タイトル／時刻テキストの描画開始 x が自ブロックの右端(x1)を超えて隣の
         # レーン(隣のタスクのカード)へはみ出して表示されないことも確認する
@@ -756,10 +813,124 @@ class CalendarRenderTests(AppTestCase):
         app._tl_width = 460  # 既定の Canvas 幅で検証する
         app._render_timeline(today)
         self.assertEqual(len(app._tl_blocks), len(tasks))  # 全タスクが描画される（欠落しない）
-        for x0, _y0, x1, _y1, cb_box, _tid, _done in app._tl_blocks:  # 各ブロックとそのチェックボックス領域を検査する
-            cb_left, _cb_top, cb_right, _cb_bottom = cb_box  # チェックボックスの判定領域の左右端を取り出す
-            self.assertGreaterEqual(cb_left, x0 - 1e-6)  # 判定領域がブロック左端より内側にあること
-            self.assertLessEqual(cb_right, x1 + 1e-6)  # 判定領域がブロック右端を超えて隣のレーンへはみ出さないこと（誤爆防止）
+        for block in app._tl_blocks:  # 各ブロックとそのチェックボックス領域を検査する
+            cb_left, _cb_top, cb_right, _cb_bottom = block.cb_box  # チェックボックスの判定領域の左右端を取り出す
+            self.assertGreaterEqual(cb_left, block.x0 - 1e-6)  # 判定領域がブロック左端より内側にあること
+            self.assertLessEqual(cb_right, block.x1 + 1e-6)  # 判定領域がブロック右端を超えて隣のレーンへはみ出さないこと（誤爆防止）
+
+    def test_assign_lanes_separates_overlaps_given_unsorted_input(self):
+        # _assign_lanes は「開始時刻の昇順で処理する」前提のスイープライン方式。
+        # active から取り除く条件（end > entry.start）は昇順でしか正しくなく、
+        # 順不同だと「まだ重なっている相手が先に active から消える」ことが起きて、
+        # 重なるカードが同じレーンに乗る＝画面上で重なって隠れる。
+        # ところが実際の入力は build_day_timeline が開始順に返し scheduled_rows も
+        # その順を保つため、関数内の sorted() を消しても他のテストは全件通ってしまう。
+        # 並べ替えが load-bearing であることをここで固定する。
+        #
+        # 反例（総当たりで発見した最小形）: A 9:48-10:03 / B 9:30-9:45 /
+        # C 10:12-10:27 / D 9:39-9:54 を A→D→C→B の順に処理すると、
+        # C(10:12) の時点で A と D が active から一掃され、その後の B が D と
+        # 同じレーン 1 を取ってしまう（B と D は 9:39-9:45 で重なっている）。
+        base = datetime.datetime(2026, 6, 6, 9, 0)
+        spans = [("A", 48), ("B", 30), ("C", 72), ("D", 39)]  # (名前, 開始オフセット分)。所要はいずれも 15 分
+        entries = {}
+        for title, offset in spans:
+            start = base + datetime.timedelta(minutes=offset)
+            entries[title] = ScheduledRow(
+                start=start,
+                end=start + datetime.timedelta(minutes=15),
+                status=STATUS_UPCOMING,
+                task=Task(title=title, due=_iso(start), duration_min=15),
+            )
+        # 最低高さ換算は本番と同じ値（_min_visual_minutes()）を渡す。既定値に頼ると
+        # レーン判定だけがクランプを知らない 0.0 で走り、描画との食い違いを見逃す
+        app, _ = self._app()
+        lanes = app._assign_lanes([entries[t] for t in ("A", "D", "C", "B")],  # 順不同で渡す
+                                  app._min_visual_minutes())
+        # B(9:30-9:45) と D(9:39-9:54) は重なっているので、必ず別レーンでなければならない
+        self.assertNotEqual(lanes[entries["B"].task.id], lanes[entries["D"].task.id])
+
+    def test_initial_canvas_height_matches_integer_arithmetic(self):
+        # 初期高さは以前「CAL_INITIAL_HOURS × HOUR_HEIGHT」の整数どうしの掛け算で
+        # 誤差ゼロだった。px→分→px の往復に変えた今も同じ値になること（＝丸めが
+        # round() であり int() の切り捨てでないこと）を固定する。
+        # この式は _build_ui の中にあるとテストで丸ごとパッチされて一度も実行されず、
+        # int() へ戻しても誰も気付けないため、メソッドに切り出して直接検証する。
+        app, _ = self._app()
+        # 既定の HOUR_HEIGHT=60 では px/分 がちょうど 1.0 になり、往復に誤差が出ない。
+        # そのままだと int() でも round() でも 720 になり、この guard は何も守らない。
+        # 往復が割り切れない値（21 → 12*60*0.35 = 251.999...）を使って丸め方を固定する
+        for hour_height in (theme.HOUR_HEIGHT, 21, 42, 69):  # 既定値と、切り捨てが 1px 失う実例
+            with self.subTest(hour_height=hour_height), \
+                 patch.object(theme, "HOUR_HEIGHT", hour_height):
+                self.assertEqual(app._initial_canvas_height(),
+                                 theme.CAL_INITIAL_HOURS * hour_height)
+
+    def test_tl_blocks_follow_timeline_row_order(self):
+        # scheduled_rows の docstring は「戻り値の並び＝描画順＝_tl_blocks の順序＝
+        # クリック判定の最前面優先」という連鎖を根拠に「並べ替えてはいけない」と
+        # 定めている。だが scheduled_rows の出口を固定するテストだけでは、
+        # 消費側（_render_timeline の描画ループ）が並びを変えても気付けない。
+        # 連鎖の 2 本目のリンクをここで固定する。
+        #
+        # 検出できる範囲（実測）: 描画ループを reversed() にすると落ちる。一方
+        # 開始時刻での sorted() は**検出できない** — _render_timeline を経由する限り
+        # 入力は build_day_timeline が開始時刻順に返したものなので、安定ソートは
+        # 常に恒等変換になり観測しようがない。scheduled_rows 自体の並べ替えは
+        # tests/test_timeline.py::test_preserves_input_order_even_when_unsorted が
+        # 順不同の入力を直接渡して押さえている（そちらは _render_timeline を通らない
+        # ので順不同を作れる）。
+        today = datetime.date.today()
+        base = datetime.datetime.combine(today, datetime.time(9, 0))
+        tasks = [
+            Task(title=f"予定{i}", due=_iso(base + datetime.timedelta(hours=i)), duration_min=30)
+            for i in range(3)
+        ]
+        app, _ = self._app(tasks)
+        app._render_timeline(today)
+        # _tl_blocks の task.id 列が、タイムライン行（＝開始時刻順）の並びと一致する
+        self.assertEqual([b.task_id for b in app._tl_blocks], [t.id for t in tasks])
+
+    def test_assign_lanes_keeps_adjacent_tasks_in_one_lane(self):
+        # active から取り除く条件は半開区間（end > entry.start）でなければならない。
+        # 「前のタスクが終わった瞬間に次が始まる」隣接タスクは重なっていないので、
+        # 同じレーンに並べてカードを全幅で描くのが正しい。
+        # ここを >= に締めると隣接タスクまで「重なっている」とみなされ、
+        # ごく普通に予定を詰めた一日のカードが軒並み半分の幅になる。
+        # 既存の重なりテストは最低高さへクランプされる短時間タスクしか使っておらず
+        # （visual_end が次の開始を越えるため）この違いを見分けられないので、
+        # クランプの影響を受けない実所要 30 分の隣接ペアで境界を固定する。
+        # 最低高さ→分の換算式（CAL_MIN_BLOCK_HEIGHT / (HOUR_HEIGHT/60)）はテスト側へ
+        # 書き写さず、_render_timeline を実際に走らせて本番の値を使わせる。
+        # 書き写すと、本番の換算だけを変えたときにテストが古い値を渡し続けて
+        # 緑のまま通り、実際のカードは半幅に割れる（§6 の一元管理）。
+        today = datetime.date.today()
+        base = datetime.datetime.combine(today, datetime.time(9, 0))
+        # 所要時間は「最低高さ換算より長い」必要がある。短いと描画上クランプされて
+        # visual_end が次の開始を越え、隣接していても正しく別レーンになるため、
+        # このテストが見たい境界（重なっていない＝同一レーン）を測れない。
+        # デザイントークンを変えただけで意味不明な座標比較エラーになるのを避けるため、
+        # 前提が崩れたことをここで名指しで落とす
+        duration = 30  # 隣接ペアの所要時間（分）
+        tasks = [
+            Task(title="前半", due=_iso(base), duration_min=duration),                                    # 9:00-9:30
+            Task(title="後半", due=_iso(base + datetime.timedelta(minutes=duration)), duration_min=duration),  # 9:30-10:00（隙間ゼロ）
+        ]
+        app, _ = self._app(tasks)
+        # 換算は本番の _min_visual_minutes() を実インスタンスから呼ぶ。式をここへ書き写すと、
+        # 本番の換算（や将来の表示倍率）だけを変えたときにこのガードが古い値で通過し、
+        # 結局「意味不明な座標比較エラー」で落ちる（＝ガードの目的を果たさない）
+        self.assertGreater(
+            duration, app._min_visual_minutes(),
+            "所要時間が最低高さ換算以下だと描画クランプで別レーンになり、この境界テストが成立しない。"
+            "theme の寸法トークンか _px_per_minute() / _min_visual_minutes() の換算を変えたなら duration を上げること",
+        )
+        app._render_timeline(today)
+        blocks = {b.task_id: b for b in app._tl_blocks}  # task.id をキーにブロック矩形を引けるようにする
+        block_a, block_b = blocks[tasks[0].id], blocks[tasks[1].id]
+        # 隣接しているだけで重なっていないので、2 件とも同じレーン＝同じ x 範囲に全幅で描かれる
+        self.assertAlmostEqual(block_a.x0, block_b.x0)
+        self.assertAlmostEqual(block_a.x1, block_b.x1)
 
     def test_short_consecutive_tasks_do_not_visually_overlap(self):
         # 所要時間が短いタスク（描画時に theme.CAL_MIN_BLOCK_HEIGHT へクランプされる）が
@@ -774,11 +945,10 @@ class CalendarRenderTests(AppTestCase):
         t2 = Task(title="短いB", due=_iso(start2), duration_min=5)
         app, _ = self._app([t1, t2])
         app._render_timeline(today)
-        blocks = {b[5]: b for b in app._tl_blocks}  # task.id をキーにブロック矩形を引けるようにする
-        x0_a, y0_a, x1_a, y1_a, _cb_a, _id_a, _done_a = blocks[t1.id]
-        x0_b, y0_b, x1_b, y1_b, _cb_b, _id_b, _done_b = blocks[t2.id]
-        x_overlap = x0_a < x1_b and x0_b < x1_a  # 2 つのカードの x 範囲が重なっているか判定する
-        y_overlap = y0_a < y1_b and y0_b < y1_a  # 2 つのカードの y 範囲が重なっているか判定する
+        blocks = {b.task_id: b for b in app._tl_blocks}  # task.id をキーにブロック矩形を引けるようにする
+        a, b = blocks[t1.id], blocks[t2.id]
+        x_overlap = a.x0 < b.x1 and b.x0 < a.x1  # 2 つのカードの x 範囲が重なっているか判定する
+        y_overlap = a.y0 < b.y1 and b.y0 < a.y1  # 2 つのカードの y 範囲が重なっているか判定する
         self.assertFalse(x_overlap and y_overlap)  # x も y も重なる（＝カード同士が重なって見える）状態にはならない
 
     def test_long_early_task_extends_grid_past_shorter_later_task(self):
@@ -822,9 +992,9 @@ class CalendarRenderTests(AppTestCase):
         app.date_var = _DummyVar()
         app.stats_var = _DummyVar()
         app._render_timeline(today)
-        blocks = [b for b in app._tl_blocks if b[5] == task.id]
+        blocks = [b for b in app._tl_blocks if b.task_id == task.id]
         self.assertTrue(blocks)
-        cb = blocks[0][4]
+        cb = blocks[0].cb_box  # クリック判定用のチェックボックス領域を名前で取り出す
         ev = Mock()
         ev.x = (cb[0] + cb[2]) / 2
         ev.y = (cb[1] + cb[3]) / 2

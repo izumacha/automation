@@ -2,7 +2,7 @@
 import datetime
 import unittest
 
-from reminder.task import Task
+from reminder.task import ISO_FMT, Task
 from reminder.timeline import (
     ROW_FREE,
     ROW_TASK,
@@ -10,6 +10,7 @@ from reminder.timeline import (
     STATUS_NOW,
     STATUS_PAST,
     STATUS_UPCOMING,
+    TimelineRow,
     backlog_tasks,
     build_day_timeline,
     carry_over_overdue,
@@ -21,6 +22,7 @@ from reminder.timeline import (
     min_to_hhmm,
     planner_day,
     prune_old_completed,
+    scheduled_rows,
     suggest_for_free_time,
 )
 
@@ -490,6 +492,125 @@ class PruneCompletedTests(unittest.TestCase):
                     completed=True, completed_at="2026-06-07T00:30:00")]
         kept = prune_old_completed(tasks, today, 9 * 60, 1 * 60)
         self.assertEqual([t.title for t in kept], ["当日深夜完了"])
+
+
+class ScheduledRowTests(unittest.TestCase):
+    """scheduled_rows（タスク行を Task 込みのビューへ組み直す関数）の単体テスト。
+
+    描画側（reminder.app）はこの関数の戻り値だけを見てカードを描くため、
+    「何を残し・何を落とすか」と「入力の並び順を保つか」をここで固定する。
+    """
+
+    @staticmethod
+    def _row(hour, title):
+        """指定時刻に始まる 30 分のタスク行を 1 件組み立てる（並び順検証用）。"""
+        start = datetime.datetime(2026, 6, 6, hour, 0)
+        # 書式はここに書き写さず ISO_FMT（唯一の参照元）を使う。書き写すと ISO_FMT を
+        # 変えたときにこのヘルパーだけが取り残され、Task.__post_init__ の中で
+        # 「開始日時の形式が不正です」という分かりにくい失敗になる（§6）
+        task = _t(title, start.strftime(ISO_FMT), 30)
+        return TimelineRow(ROW_TASK, start, start + datetime.timedelta(minutes=30), 30, task=task)
+
+    @staticmethod
+    def _broken_row(hour):
+        """task が欠けたタスク行（本来ありえない形）を 1 件組み立てる。"""
+        start = datetime.datetime(2026, 6, 6, hour, 0)
+        return TimelineRow(ROW_TASK, start, start + datetime.timedelta(minutes=30), 30, task=None)
+
+    def test_keeps_only_task_rows(self):
+        # 空き時間行を挟んだタスク行が、タスクと状態込みで返ることを確かめる
+        rows = build_day_timeline(
+            [_t("朝会", "2026-06-06T09:00:00", 30), _t("資料作成", "2026-06-06T11:00:00", 60)],
+            datetime.date(2026, 6, 6),
+            now=datetime.datetime(2026, 6, 6, 8, 0),
+        )
+        self.assertTrue(any(r.kind == ROW_FREE for r in rows))  # 入力に空き時間行が含まれている前提を確かめる
+        entries = scheduled_rows(rows)
+        # 空き時間行は落ち、タスク行だけが残る
+        self.assertEqual([e.task.title for e in entries], ["朝会", "資料作成"])
+        # 開始・終了・状態は元のタスク行から写されている
+        self.assertEqual([e.start.hour for e in entries], [9, 11])
+        self.assertEqual([e.end.hour for e in entries], [9, 12])
+        self.assertEqual([e.status for e in entries], [STATUS_UPCOMING, STATUS_UPCOMING])
+
+    def test_preserves_input_order_even_when_unsorted(self):
+        # 戻り値の並びは描画順 → _tl_blocks の順序 → クリック判定の「最前面優先」に
+        # 直結するため、scheduled_rows は絶対に並べ替えてはいけない。
+        # build_day_timeline は既に開始時刻順で返すので、それだけを入力にすると
+        # 実装が sorted() を挟んでもテストが通ってしまう。ここでは開始時刻が
+        # 降順になるよう手組みした入力を渡し、その順序が保たれることを固定する
+        rows = [self._row(15, "夕方"), self._row(11, "昼"), self._row(9, "朝")]
+        entries = scheduled_rows(rows)
+        self.assertEqual([e.task.title for e in entries], ["夕方", "昼", "朝"])
+        self.assertEqual([e.start.hour for e in entries], [15, 11, 9])
+
+    def test_drops_free_rows(self):
+        # 空き時間行しか無い（タスクが 1 件も無い）日は空リストになる
+        rows = build_day_timeline(
+            [], datetime.date(2026, 6, 6), now=datetime.datetime(2026, 6, 6, 8, 0)
+        )
+        self.assertTrue(any(r.kind == ROW_FREE for r in rows))
+        self.assertEqual(scheduled_rows(rows), [])
+
+    def test_drops_only_the_broken_row_and_keeps_the_rest(self):
+        # task が欠けたタスク行は安全側に倒して除外する（描画側で None を掴ませない）が、
+        # 落とすのはその 1 行だけで、後続の正常な行は残さなければならない。
+        # 壊れた行を 1 件だけ渡すテストだと continue を break に取り違えても戻り値が
+        # 同じ [] になって通ってしまうため、正常行で挟んだ入力で固定する
+        # （break 化すると「壊れた行より後ろの予定が全部消える」＝その日の大半が消える）
+        rows = [self._row(9, "朝会"), self._broken_row(11), self._row(15, "夕会")]
+        entries = scheduled_rows(rows)
+        self.assertEqual([e.task.title for e in entries], ["朝会", "夕会"])
+
+    def test_broken_row_logs_the_dropped_count_not_the_row_count(self):
+        # 捨てた事実はログに残す（§6 エラーを握り潰さない）。件数だけを出し、
+        # タスク名や時刻は載せない（利用者の予定内容をログへ写さないため）。
+        # 正常行を混ぜた入力にするのは、報告する数が「捨てた件数」であって
+        # 「入力の行数」ではないことを固定するため。全行が壊れた入力だと
+        # dropped を len(rows) に取り違えても同じ数字になって通ってしまい、
+        # 実運用（50 行の日に 1 行だけ壊れる）で「50 件除外しました」と
+        # 一日の予定がほぼ消えたかのように誤報する回帰を見逃す
+        rows = [self._row(9, "朝会"), self._broken_row(11), self._row(13, "昼会"), self._row(15, "夕会")]
+        with self.assertLogs("reminder.timeline", level="WARNING") as captured:
+            scheduled_rows(rows)
+        self.assertEqual(len(captured.records), 1)  # 1 回の呼び出しにつきまとめて 1 行
+        # 文言への部分文字列一致ではなく、ログに渡した引数そのものを固定する。
+        # "1" の in 判定だと 13 や 21 を報告する回帰も通ってしまい、
+        # 「入力の行数ではなく捨てた件数を報告する」という本来の主張を固定できない
+        self.assertEqual(captured.records[0].args, (1,))
+
+    def test_valid_rows_do_not_warn(self):
+        # 正常な行だけのときは警告を出さない（ログのノイズで本物の異常を埋もれさせない）
+        with self.assertNoLogs("reminder.timeline", level="WARNING"):
+            self.assertEqual(len(scheduled_rows([self._row(9, "朝会")])), 1)
+
+    def test_free_rows_do_not_warn(self):
+        # 空き時間行（ROW_FREE）は必ず task=None を持つ。2 つの guard の順番を
+        # 取り違えて「task が None か」を先に見ると、ごく普通の一日でも再描画の
+        # たびに「N 件を表示から除外しました」と鳴り続け、健全なアプリが壊れて
+        # 見えるうえ、この警告が存在する唯一の目的（本物の欠落の検知）を
+        # 自らのノイズで潰してしまう。空き時間行を含む入力で無警告を固定する
+        rows = build_day_timeline(
+            [_t("朝会", "2026-06-06T09:00:00", 30)],
+            datetime.date(2026, 6, 6),
+            now=datetime.datetime(2026, 6, 6, 8, 0),
+        )
+        self.assertTrue(any(r.kind == ROW_FREE for r in rows))  # 空き時間行が含まれている前提を確かめる
+        with self.assertNoLogs("reminder.timeline", level="WARNING"):
+            scheduled_rows(rows)
+
+    def test_is_hashable_by_identity(self):
+        # frozen dataclass なので mypy は hashable とみなす。実行時もそうであることを固定する
+        # （可変な Task を含むため、自動生成ハッシュのままだと実行時に TypeError になり、
+        #  set(entries) や {entry: lane} が型検査を素通りして落ちる）。
+        # eq=False により比較・ハッシュとも同一性ベースなので、辞書へ入れた後に
+        # タスクが変化しても同じオブジェクトで引き続けられる
+        entries = scheduled_rows([self._row(9, "朝会"), self._row(11, "昼会")])
+        self.assertEqual(len(set(entries)), 2)
+        first = entries[0]
+        by_entry = {e: i for i, e in enumerate(entries)}
+        first.task.completed = True  # 辞書へ入れた後にタスクを書き換えても
+        self.assertEqual(by_entry[first], 0)  # 同じオブジェクトなら引けたままであること
 
 
 if __name__ == "__main__":
