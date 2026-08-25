@@ -156,7 +156,7 @@ CAL_TIME_PAD_BOTTOM = 7    # 時刻文字とカード下端の間の余白（ピ
 # カレンダー描画の寸法トークン（続き）。以前は app.py に生の数値として
 # 直書きされていたため、CLAUDE.md §6「見た目の値をコードに直書きしない」に
 # 従いここへ集約する。
-CAL_INITIAL_HOURS = 12     # カレンダー Canvas の初期表示時間数（時間単位。初期高さ = CAL_INITIAL_HOURS × HOUR_HEIGHT）
+CAL_INITIAL_HOURS = 12     # カレンダー Canvas の初期表示時間数（時間単位）。px への換算は PlannerApp._px_per_minute() 経由
 CAL_MIN_DRAW_WIDTH = 80    # 時刻ラベル列（CAL_GUTTER）の右に確保する描画エリアの最小幅（ピクセル単位）
 CAL_SELECT_OUTLINE_W = 3   # 選択中タスクカードの枠線の太さ（ピクセル単位）
 CAL_OUTLINE_W = 1          # 非選択タスクカードの枠線の太さ（ピクセル単位）

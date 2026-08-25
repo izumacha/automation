@@ -817,7 +817,11 @@ class CalendarRenderTests(AppTestCase):
                 status=STATUS_UPCOMING,
                 task=Task(title=title, due=_iso(start), duration_min=15),
             )
-        lanes = PlannerApp._assign_lanes([entries[t] for t in ("A", "D", "C", "B")])  # 順不同で渡す
+        # 最低高さ換算は本番と同じ値（_min_visual_minutes()）を渡す。既定値に頼ると
+        # レーン判定だけがクランプを知らない 0.0 で走り、描画との食い違いを見逃す
+        app, _ = self._app()
+        lanes = app._assign_lanes([entries[t] for t in ("A", "D", "C", "B")],  # 順不同で渡す
+                                  app._min_visual_minutes())
         # B(9:30-9:45) と D(9:39-9:54) は重なっているので、必ず別レーンでなければならない
         self.assertNotEqual(lanes[entries["B"].task.id], lanes[entries["D"].task.id])
 

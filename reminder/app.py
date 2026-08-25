@@ -403,7 +403,10 @@ class PlannerApp:
         # 将来ズームを入れたときに描画(scale)とレーン判定だけが倍率に追随して
         # Canvas の初期高さが取り残され、開いた直後だけ想定の半分の時間しか
         # 見えない状態になる（_px_per_minute の docstring が防ぐと書いている食い違い）
-        initial_height = int(theme.CAL_INITIAL_HOURS * 60 * self._px_per_minute())  # 初期表示時間数を分に直して px へ換算する
+        # int() で切り捨てると px→分→px の往復で 1px 失うことがある
+        # （例: HOUR_HEIGHT=21 だと 252 が 251 になる。倍率を掛けると外れる組み合わせが増える）。
+        # 整数どうしの掛け算だった以前の実装と同じ値を保つため round() で丸める
+        initial_height = round(theme.CAL_INITIAL_HOURS * 60 * self._px_per_minute())  # 初期表示時間数を分に直して px へ換算する
         self.timeline_tree = tk.Canvas(body, bg=theme.CARD, highlightthickness=0,
                                        height=initial_height)  # カレンダーを描く Canvas を作る
         self.timeline_tree.grid(row=0, column=0, sticky="nsew")  # Canvas を四辺いっぱいに配置する
@@ -879,7 +882,7 @@ class PlannerApp:
         return theme.CAL_MIN_BLOCK_HEIGHT / self._px_per_minute()
 
     @staticmethod
-    def _assign_lanes(task_rows: list[ScheduledRow], min_visual_minutes: float = 0.0) -> dict[str, int]:
+    def _assign_lanes(task_rows: list[ScheduledRow], min_visual_minutes: float) -> dict[str, int]:
         """重なり合うタスクを横レーンに割り当てる（task.id → レーン番号）。
 
         Args:
@@ -889,6 +892,11 @@ class PlannerApp:
                 この長さぶん描画されるため、レーンの重なり判定にも同じ長さを
                 加味し、隣接する短時間タスク同士が同じレーンで視覚的に
                 重ならないようにする。
+                **既定値は置かない**: 省略できると 0.0 が使われ、レーン判定だけが
+                クランプを知らないまま「重なっていない」と判断する一方で
+                _draw_task_block は最低高さまで伸ばして描くため、カードが同じレーンで
+                視覚的に重なる（test_short_consecutive_tasks_do_not_visually_overlap が
+                防いでいる回帰そのもの）。必ず _min_visual_minutes() の値を渡す。
         """
         lanes: dict[str, int] = {}  # タスク ID → レーン番号の対応辞書を初期化する
         min_gap = datetime.timedelta(minutes=min_visual_minutes)  # 最低高さを timedelta に変換する

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .task import ISO_FMT, Task
@@ -132,7 +133,7 @@ class ScheduledRow:
     task: Task  # その行が指すタスク（None にはならない）
 
 
-def scheduled_rows(rows: list[TimelineRow]) -> list[ScheduledRow]:
+def scheduled_rows(rows: Sequence[TimelineRow]) -> list[ScheduledRow]:
     """タイムライン行からタスク行だけを取り出し、Task 込みのビューにして返す。
 
     空き時間行（ROW_FREE）は当然除外し、万一 task が欠けたタスク行も除外する。
@@ -147,7 +148,9 @@ def scheduled_rows(rows: list[TimelineRow]) -> list[ScheduledRow]:
     ここで並べ替えてはいけない。
 
     Args:
-        rows: build_day_timeline が返したタイムライン行。
+        rows: build_day_timeline が返したタイムライン行（読み取るだけなので
+            list に限らず tuple 等の Sequence でよい。公開 API なので、
+            呼び出し側に list() のコピーを強いないよう広く受ける）。
 
     Returns:
         タスク行のビューのリスト（入力の並び順を保つ）。
