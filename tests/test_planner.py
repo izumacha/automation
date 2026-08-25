@@ -1,7 +1,9 @@
 """tests/test_planner.py — PlannerApp（タイムライン版）/ main のテスト
 
-GUI 依存を避けるため _build_ui・_refresh・_schedule_all をパッチして
-ロジック層（タスク追加・完了・削除・あとで⇄予定の移動・通知スケジュール）を検証する。
+GUI 依存を避けるため PlannerApp.__init__ の副作用をパッチして、ロジック層
+（タスク追加・完了・削除・あとで⇄予定の移動・通知スケジュール）を検証する。
+何をパッチするかは AppTestCase._INIT_PATCHED_METHODS が唯一の一覧なので、
+ここには写さない（写すと片方だけ古くなる）。
 """
 import contextlib
 import datetime
@@ -77,7 +79,15 @@ class AppTestCase(unittest.TestCase):
     # ここを唯一の一覧にして、構築経路ごとに書き写さないようにする（書き写すと
     # 新しいパッチを足したときに片方だけ取り残される。実際 _get_now の追加で
     # test_init_schedules_periodic_refresh 側が実時計を読んだままになっていた）。
-    _INIT_PATCHED_METHODS = ("_build_ui", "_refresh", "_schedule_all", "_schedule_periodic_refresh")
+    # 値は「patch.object へ渡す追加キーワード」。_get_now だけは戻り値を固定したいので
+    # return_value を持たせる（__init__ が実時計を読まないようにするフレーク対策の要）。
+    _INIT_PATCHED_METHODS = {
+        "_build_ui": {},                 # ウィジェット構築（tkinter が要る）
+        "_refresh": {},                  # 初回描画
+        "_schedule_all": {},             # 起動時の通知スケジュール
+        "_schedule_periodic_refresh": {},  # 定期リフレッシュのタイマー登録
+        "_get_now": {"return_value": _INIT_NOW},  # 実時計の読み取り
+    }
 
     @contextlib.contextmanager
     def _construction_patches(self, tasks=None, prefs=None, skip=()):
@@ -87,11 +97,9 @@ class AppTestCase(unittest.TestCase):
         （例: 定期リフレッシュの登録そのものを検証したいテスト）。
         """
         with contextlib.ExitStack() as stack:
-            for name in self._INIT_PATCHED_METHODS:  # 一覧のうち skip 以外をパッチする
+            for name, kwargs in self._INIT_PATCHED_METHODS.items():  # 一覧のうち skip 以外をパッチする
                 if name not in skip:
-                    stack.enter_context(patch.object(PlannerApp, name))
-            # __init__ が実時計を読まないよう _get_now を固定する（フレーク防止の要）
-            stack.enter_context(patch.object(PlannerApp, "_get_now", return_value=self._INIT_NOW))
+                    stack.enter_context(patch.object(PlannerApp, name, **kwargs))
             stack.enter_context(patch("reminder.app.load_tasks", return_value=list(tasks or [])))
             stack.enter_context(patch("reminder.app.load_prefs", return_value=prefs or Prefs()))
             stack.enter_context(patch("reminder.app.tk.StringVar",
