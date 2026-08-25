@@ -813,8 +813,16 @@ class CalendarRenderTests(AppTestCase):
         # scheduled_rows の docstring は「戻り値の並び＝描画順＝_tl_blocks の順序＝
         # クリック判定の最前面優先」という連鎖を根拠に「並べ替えてはいけない」と
         # 定めている。だが scheduled_rows の出口を固定するテストだけでは、
-        # 消費側（_render_timeline の描画ループ）を reversed() や sorted() に
-        # 変えても無警告で通ってしまう。連鎖の 2 本目のリンクをここで固定する。
+        # 消費側（_render_timeline の描画ループ）が並びを変えても気付けない。
+        # 連鎖の 2 本目のリンクをここで固定する。
+        #
+        # 検出できる範囲（実測）: 描画ループを reversed() にすると落ちる。一方
+        # 開始時刻での sorted() は**検出できない** — _render_timeline を経由する限り
+        # 入力は build_day_timeline が開始時刻順に返したものなので、安定ソートは
+        # 常に恒等変換になり観測しようがない。scheduled_rows 自体の並べ替えは
+        # tests/test_timeline.py::test_preserves_input_order_even_when_unsorted が
+        # 順不同の入力を直接渡して押さえている（そちらは _render_timeline を通らない
+        # ので順不同を作れる）。
         today = datetime.date.today()
         base = datetime.datetime.combine(today, datetime.time(9, 0))
         tasks = [

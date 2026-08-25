@@ -781,7 +781,7 @@ class PlannerApp:
         window_start = min(r.start for r in rows)  # 表示ウィンドウの開始時刻(全行中の最小開始)
         window_end = max(r.end for r in rows)  # 表示ウィンドウの終了時刻(全行中の最大終了)
 
-        scale = theme.HOUR_HEIGHT / 60.0  # 1 分あたりのピクセル数を計算する
+        scale = theme.PX_PER_MINUTE  # 1 分あたりのピクセル数（換算はテーマ側の唯一の定義）
 
         def y_of(dt: datetime.datetime) -> float:
             return theme.CAL_PAD_TOP + (dt - window_start).total_seconds() / 60.0 * scale  # 日時を Canvas の y 座標（ピクセル）に変換する
@@ -844,8 +844,8 @@ class PlannerApp:
         本番の換算だけを変えたときにテストが古い値を使い続けて緑のまま通り、
         実際のカードだけが割れる（§6 定数・式の一元管理）。
         """
-        # 1 分あたりのピクセル数（_render_timeline の scale と同じ定義）で割って分に直す
-        return theme.CAL_MIN_BLOCK_HEIGHT / (theme.HOUR_HEIGHT / 60.0)
+        # 1 分あたりのピクセル数（_render_timeline の scale と同じ唯一の定義）で割って分に直す
+        return theme.CAL_MIN_BLOCK_HEIGHT / theme.PX_PER_MINUTE
 
     @staticmethod
     def _assign_lanes(task_rows: list[ScheduledRow], min_visual_minutes: float = 0.0) -> dict[str, int]:
