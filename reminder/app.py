@@ -399,8 +399,13 @@ class PlannerApp:
         body.columnconfigure(0, weight=1)  # Canvas が横いっぱいに広がるよう列 0 を伸縮させる
         body.rowconfigure(0, weight=1)  # Canvas が縦いっぱいに広がるよう行 0 を伸縮させる
         # timeline_tree という名前は後方互換のため踏襲（実体はカレンダー Canvas）。
+        # 初期高さも _px_per_minute() を経由して求める。theme.HOUR_HEIGHT を直接掛けると、
+        # 将来ズームを入れたときに描画(scale)とレーン判定だけが倍率に追随して
+        # Canvas の初期高さが取り残され、開いた直後だけ想定の半分の時間しか
+        # 見えない状態になる（_px_per_minute の docstring が防ぐと書いている食い違い）
+        initial_height = int(theme.CAL_INITIAL_HOURS * 60 * self._px_per_minute())  # 初期表示時間数を分に直して px へ換算する
         self.timeline_tree = tk.Canvas(body, bg=theme.CARD, highlightthickness=0,
-                                       height=theme.CAL_INITIAL_HOURS * theme.HOUR_HEIGHT)  # カレンダーを描く Canvas を作る（初期高さはテーマの初期表示時間数ぶん）
+                                       height=initial_height)  # カレンダーを描く Canvas を作る
         self.timeline_tree.grid(row=0, column=0, sticky="nsew")  # Canvas を四辺いっぱいに配置する
         sb = ttk.Scrollbar(body, orient="vertical", command=self.timeline_tree.yview)  # Canvas の縦スクロールバーを作る
         self.timeline_tree.configure(yscrollcommand=sb.set)  # スクロールバーと Canvas を連動させる
