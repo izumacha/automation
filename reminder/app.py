@@ -399,16 +399,8 @@ class PlannerApp:
         body.columnconfigure(0, weight=1)  # Canvas が横いっぱいに広がるよう列 0 を伸縮させる
         body.rowconfigure(0, weight=1)  # Canvas が縦いっぱいに広がるよう行 0 を伸縮させる
         # timeline_tree という名前は後方互換のため踏襲（実体はカレンダー Canvas）。
-        # 初期高さも _px_per_minute() を経由して求める。theme.HOUR_HEIGHT を直接掛けると、
-        # 将来ズームを入れたときに描画(scale)とレーン判定だけが倍率に追随して
-        # Canvas の初期高さが取り残され、開いた直後だけ想定の半分の時間しか
-        # 見えない状態になる（_px_per_minute の docstring が防ぐと書いている食い違い）
-        # int() で切り捨てると px→分→px の往復で 1px 失うことがある
-        # （例: HOUR_HEIGHT=21 だと 252 が 251 になる。倍率を掛けると外れる組み合わせが増える）。
-        # 整数どうしの掛け算だった以前の実装と同じ値を保つため round() で丸める
-        initial_height = round(theme.CAL_INITIAL_HOURS * 60 * self._px_per_minute())  # 初期表示時間数を分に直して px へ換算する
         self.timeline_tree = tk.Canvas(body, bg=theme.CARD, highlightthickness=0,
-                                       height=initial_height)  # カレンダーを描く Canvas を作る
+                                       height=self._initial_canvas_height())  # カレンダーを描く Canvas を作る
         self.timeline_tree.grid(row=0, column=0, sticky="nsew")  # Canvas を四辺いっぱいに配置する
         sb = ttk.Scrollbar(body, orient="vertical", command=self.timeline_tree.yview)  # Canvas の縦スクロールバーを作る
         self.timeline_tree.configure(yscrollcommand=sb.set)  # スクロールバーと Canvas を連動させる
@@ -868,6 +860,24 @@ class PlannerApp:
         """
         # 1 時間あたりの高さ（px）を 60 で割って「1 分あたりのピクセル数」にする
         return theme.HOUR_HEIGHT / 60.0
+
+    def _initial_canvas_height(self) -> int:
+        """カレンダー Canvas の初期高さ（px）を返す。
+
+        _px_per_minute() を経由して求めるのは、theme.HOUR_HEIGHT を直接掛けると
+        将来ズームを入れたときに描画(scale)とレーン判定だけが倍率に追随して
+        初期高さが取り残され、開いた直後だけ想定の半分の時間しか見えない状態に
+        なるため（_px_per_minute の docstring が防ぐと書いている食い違い）。
+
+        メソッドとして切り出しているのは検証できるようにするため: _build_ui は
+        テストで丸ごとパッチされるので、この式を _build_ui の中に置くと
+        どのテストからも実行されず、丸め方を int() に戻しても誰も気付けない。
+        """
+        # 表示時間数を分に直し、1 分あたりのピクセル数を掛けて px にする。
+        # int() の切り捨てだと px→分→px の往復で 1px 失うことがある
+        # （例: HOUR_HEIGHT=21 で 252 が 251 になる。倍率を掛けると外れる組み合わせが増える）。
+        # 整数どうしの掛け算だった以前の実装と同じ値を保つため round() で丸める
+        return round(theme.CAL_INITIAL_HOURS * 60 * self._px_per_minute())
 
     def _min_visual_minutes(self) -> float:
         """描画上の最低高さ（theme.CAL_MIN_BLOCK_HEIGHT px）を「分」に換算して返す。

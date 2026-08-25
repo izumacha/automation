@@ -825,6 +825,16 @@ class CalendarRenderTests(AppTestCase):
         # B(9:30-9:45) と D(9:39-9:54) は重なっているので、必ず別レーンでなければならない
         self.assertNotEqual(lanes[entries["B"].task.id], lanes[entries["D"].task.id])
 
+    def test_initial_canvas_height_matches_integer_arithmetic(self):
+        # 初期高さは以前「CAL_INITIAL_HOURS × HOUR_HEIGHT」の整数どうしの掛け算で
+        # 誤差ゼロだった。px→分→px の往復に変えた今も同じ値になること（＝丸めが
+        # round() であり int() の切り捨てでないこと）を固定する。
+        # この式は _build_ui の中にあるとテストで丸ごとパッチされて一度も実行されず、
+        # int() へ戻しても誰も気付けないため、メソッドに切り出して直接検証する。
+        app, _ = self._app()
+        self.assertEqual(app._initial_canvas_height(),
+                         theme.CAL_INITIAL_HOURS * theme.HOUR_HEIGHT)
+
     def test_tl_blocks_follow_timeline_row_order(self):
         # scheduled_rows の docstring は「戻り値の並び＝描画順＝_tl_blocks の順序＝
         # クリック判定の最前面優先」という連鎖を根拠に「並べ替えてはいけない」と
