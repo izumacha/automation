@@ -792,6 +792,31 @@ class CalendarRenderTests(AppTestCase):
         # B(9:30-9:45) と D(9:39-9:54) は重なっているので、必ず別レーンでなければならない
         self.assertNotEqual(lanes[entries["B"].task.id], lanes[entries["D"].task.id])
 
+    def test_assign_lanes_keeps_adjacent_tasks_in_one_lane(self):
+        # active から取り除く条件は半開区間（end > entry.start）でなければならない。
+        # 「前のタスクが終わった瞬間に次が始まる」隣接タスクは重なっていないので、
+        # 同じレーンに並べてカードを全幅で描くのが正しい。
+        # ここを >= に締めると隣接タスクまで「重なっている」とみなされ、
+        # ごく普通に予定を詰めた一日のカードが軒並み半分の幅になる。
+        # 既存の重なりテストは最低高さへクランプされる短時間タスクしか使っておらず
+        # （visual_end が次の開始を越えるため）この違いを見分けられないので、
+        # クランプの影響を受けない実所要 30 分の隣接ペアで境界を固定する。
+        base = datetime.datetime(2026, 6, 6, 9, 0)
+        entries = []
+        for i, title in enumerate(("前半", "後半")):
+            start = base + datetime.timedelta(minutes=30 * i)  # 9:00-9:30 と 9:30-10:00（隙間ゼロ）
+            entries.append(ScheduledRow(
+                start=start,
+                end=start + datetime.timedelta(minutes=30),
+                status=STATUS_UPCOMING,
+                task=Task(title=title, due=_iso(start), duration_min=30),
+            ))
+        # 本番と同じ最低高さ換算（CAL_MIN_BLOCK_HEIGHT / (HOUR_HEIGHT/60) = 24 分）を渡す
+        min_visual_minutes = theme.CAL_MIN_BLOCK_HEIGHT / (theme.HOUR_HEIGHT / 60.0)
+        lanes = PlannerApp._assign_lanes(entries, min_visual_minutes)
+        # 隣接しているだけで重なっていないので、2 件とも同じレーン 0 に乗る
+        self.assertEqual(sorted(lanes.values()), [0, 0])
+
     def test_short_consecutive_tasks_do_not_visually_overlap(self):
         # 所要時間が短いタスク（描画時に theme.CAL_MIN_BLOCK_HEIGHT へクランプされる）が
         # 隙間なく連続すると、実終了時刻を超えて描かれたクランプ分が次のタスクの

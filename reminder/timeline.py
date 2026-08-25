@@ -125,7 +125,6 @@ class ScheduledRow:
     task: Task  # その行が指すタスク（None にはならない）
 
 
-
 def scheduled_rows(rows: list[TimelineRow]) -> list[ScheduledRow]:
     """タイムライン行からタスク行だけを取り出し、Task 込みのビューにして返す。
 

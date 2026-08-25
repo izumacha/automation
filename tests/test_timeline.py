@@ -2,7 +2,7 @@
 import datetime
 import unittest
 
-from reminder.task import Task
+from reminder.task import ISO_FMT, Task
 from reminder.timeline import (
     ROW_FREE,
     ROW_TASK,
@@ -505,7 +505,10 @@ class ScheduledRowTests(unittest.TestCase):
     def _row(hour, title):
         """指定時刻に始まる 30 分のタスク行を 1 件組み立てる（並び順検証用）。"""
         start = datetime.datetime(2026, 6, 6, hour, 0)
-        task = _t(title, start.strftime("%Y-%m-%dT%H:%M:%S"), 30)
+        # 書式はここに書き写さず ISO_FMT（唯一の参照元）を使う。書き写すと ISO_FMT を
+        # 変えたときにこのヘルパーだけが取り残され、Task.__post_init__ の中で
+        # 「開始日時の形式が不正です」という分かりにくい失敗になる（§6）
+        task = _t(title, start.strftime(ISO_FMT), 30)
         return TimelineRow(ROW_TASK, start, start + datetime.timedelta(minutes=30), 30, task=task)
 
     @staticmethod
@@ -559,18 +562,41 @@ class ScheduledRowTests(unittest.TestCase):
         entries = scheduled_rows(rows)
         self.assertEqual([e.task.title for e in entries], ["朝会", "夕会"])
 
-    def test_broken_row_is_logged(self):
+    def test_broken_row_logs_the_dropped_count_not_the_row_count(self):
         # 捨てた事実はログに残す（§6 エラーを握り潰さない）。件数だけを出し、
-        # タスク名や時刻は載せない（利用者の予定内容をログへ写さないため）
+        # タスク名や時刻は載せない（利用者の予定内容をログへ写さないため）。
+        # 正常行を混ぜた入力にするのは、報告する数が「捨てた件数」であって
+        # 「入力の行数」ではないことを固定するため。全行が壊れた入力だと
+        # dropped を len(rows) に取り違えても同じ数字になって通ってしまい、
+        # 実運用（50 行の日に 1 行だけ壊れる）で「50 件除外しました」と
+        # 一日の予定がほぼ消えたかのように誤報する回帰を見逃す
+        rows = [self._row(9, "朝会"), self._broken_row(11), self._row(13, "昼会"), self._row(15, "夕会")]
         with self.assertLogs("reminder.timeline", level="WARNING") as captured:
-            scheduled_rows([self._broken_row(9), self._broken_row(11)])
+            scheduled_rows(rows)
         self.assertEqual(len(captured.records), 1)  # 1 回の呼び出しにつきまとめて 1 行
-        self.assertIn("2", captured.records[0].getMessage())  # 捨てた件数が含まれる
+        message = captured.records[0].getMessage()
+        self.assertIn("1", message)  # 捨てた件数（1 件）が含まれる
+        self.assertNotIn("4", message)  # 入力の行数（4 行）を報告していない
 
     def test_valid_rows_do_not_warn(self):
         # 正常な行だけのときは警告を出さない（ログのノイズで本物の異常を埋もれさせない）
         with self.assertNoLogs("reminder.timeline", level="WARNING"):
             self.assertEqual(len(scheduled_rows([self._row(9, "朝会")])), 1)
+
+    def test_free_rows_do_not_warn(self):
+        # 空き時間行（ROW_FREE）は必ず task=None を持つ。2 つの guard の順番を
+        # 取り違えて「task が None か」を先に見ると、ごく普通の一日でも再描画の
+        # たびに「N 件を表示から除外しました」と鳴り続け、健全なアプリが壊れて
+        # 見えるうえ、この警告が存在する唯一の目的（本物の欠落の検知）を
+        # 自らのノイズで潰してしまう。空き時間行を含む入力で無警告を固定する
+        rows = build_day_timeline(
+            [_t("朝会", "2026-06-06T09:00:00", 30)],
+            datetime.date(2026, 6, 6),
+            now=datetime.datetime(2026, 6, 6, 8, 0),
+        )
+        self.assertTrue(any(r.kind == ROW_FREE for r in rows))  # 空き時間行が含まれている前提を確かめる
+        with self.assertNoLogs("reminder.timeline", level="WARNING"):
+            scheduled_rows(rows)
 
     def test_is_hashable_by_identity(self):
         # frozen dataclass なので mypy は hashable とみなす。実行時もそうであることを固定する
