@@ -51,10 +51,27 @@ SaveBlockedListener = Callable[[str, "str | None"], None]  # UI 通知コール�
 _save_blocked_listener: SaveBlockedListener | None = None  # 保存拒否を通知する登録済みコールバック（未登録なら None）
 _save_blocked_notified = False  # このセッションで保存拒否をすでに通知したかどうか（通知はセッション中 1 回だけ）
 
-# ディレクトリ fsync の省略をこのセッションで既に警告したかどうか。省略は「電源断への
-# 耐性が失われたまま誰も気づけない」状態なので、POSIX では 1 回だけ警告として知らせる
-# （保存のたびに鳴らすとうるさいため、_save_blocked_notified と同じ「1 回だけ」方式にする）。
-_dir_fsync_warned = False  # POSIX でのディレクトリ fsync 省略をすでに警告したか
+# ディレクトリを開いて fsync できるかどうか（POSIX だけができる）。os.name は実行中に
+# 変わらないので起動時に 1 度だけ判定する。os.name を直接見ずにこの定数を挟むのは、
+# テストが「Windows の分岐」を試すときに標準ライブラリの os を書き換えずに済ませるため
+# （reminder.config.os は os モジュールそのものなので、patch すると全モジュールに効いてしまう）。
+_SUPPORTS_DIRECTORY_FSYNC = os.name == "posix"  # ディレクトリの fsync が可能な環境かどうか
+
+# ディレクトリ fsync の省略は「電源断への耐性が失われたまま誰も気づけない」状態なので、
+# POSIX では 1 回だけ警告として知らせる（保存のたびに鳴らすとうるさいため、
+# _save_blocked_notified と同じ「1 回だけ」方式にする）。
+# ただし**用途ごとに分ける**。予算を 1 つにすると、起動時の隔離（データは失われない）が
+# 唯一の警告枠を使い切り、以降は保存側（実際にデータが危ういのはこちら）の警告が
+# 二度と出なくなる — 危険度の低い経路が危険な経路を黙らせてしまう。
+_DIR_FSYNC_SAVE = "save"  # 原子的書き込みの改名を確定させる用途
+_DIR_FSYNC_QUARANTINE = "quarantine"  # 壊れたファイルの隔離（.corrupt への改名）を確定させる用途
+# 省略されたときに何が起きうるかも用途によって違うため、警告文の結びを用途ごとに持つ。
+# 隔離の側で「直前の保存が失われる」と書くと、保存していないのに保存が危ういと誤解させる。
+_DIR_FSYNC_CONSEQUENCE = {
+    _DIR_FSYNC_SAVE: "保存内容は書けていますが、電源断で直前の保存が失われる可能性があります。",
+    _DIR_FSYNC_QUARANTINE: "退避（.corrupt への改名）が電源断で巻き戻る可能性があります。データ自体は失われません。",
+}
+_dir_fsync_warned: set[str] = set()  # すでに警告した用途（_DIR_FSYNC_* のいずれか）の集合
 
 
 def set_save_blocked_listener(listener: SaveBlockedListener | None) -> None:
@@ -152,29 +169,30 @@ def _preserve_corrupt_file(path: str) -> None:
     # 片方だけ確定させると「このモジュールの改名は確定済み」という約束が場所によって崩れ、
     # 監査する人が隔離も守られていると誤解する（隔離が巻き戻ってもデータは失われず次回起動で
     # やり直されるが、不変条件を黙って破らないために揃えておく）。
-    _fsync_directory(os.path.dirname(path) or ".")  # 退避（改名）をディスクへ確定させる
+    _fsync_directory(os.path.dirname(path) or ".", _DIR_FSYNC_QUARANTINE)  # 退避（改名）をディスクへ確定させる
     logging.warning("読み込めないファイルを %s へ退避しました。必要ならこのファイルから手動で復旧できます。", backup_path)  # 退避先の場所をユーザーへ知らせる
 
 
-def _warn_dir_fsync_unavailable(what: str, directory: str, error: Exception) -> None:
-    """POSIX でディレクトリ fsync を省略した事実を、セッション中 1 回だけ警告として記録する。
+def _warn_dir_fsync_unavailable(what: str, directory: str, error: Exception, purpose: str) -> None:
+    """ディレクトリ fsync を省略した事実を、用途ごとに 1 回だけ警告として記録する。
 
     呼ばれるのは POSIX だけ（_fsync_directory が非 POSIX を早期 return するため）。
     POSIX で省略が起きるのは想定外（SELinux/AppArmor の拒否、FUSE 系ホーム、制限の強い
     コンテナのマウントなど）で、そのとき失われるのはまさに _fsync_directory が足そうと
     した電源断耐性そのものである。デバッグログに落とすと cli.py が INFO で起動する以上
     ユーザーには一生見えないため、警告として残す（§6 エラーを握り潰さない）。
-    ただし保存のたびに鳴らさないよう、警告は 1 回だけにして以降はデバッグに落とす。
+    ただし保存のたびに鳴らさないよう、警告は用途ごとに 1 回だけにして以降はデバッグに落とす。
+
+    purpose には _DIR_FSYNC_SAVE / _DIR_FSYNC_QUARANTINE を渡す。これが警告文の結び
+    （何が起きうるか）と「1 回だけ」の予算の両方を決める（理由は定数側のコメント参照）。
     """
-    global _dir_fsync_warned  # 「警告済み」フラグを書き換えるため global 宣言する
-    if _dir_fsync_warned:  # すでにこのセッションで警告済みの場合は
+    if purpose in _dir_fsync_warned:  # この用途ではすでに警告済みの場合は
         logging.debug("%s (%s): %s", what, directory, error)  # 繰り返しを避けてデバッグログに留める
         return  # 警告は重ねない
-    _dir_fsync_warned = True  # このセッションでは警告済みであることを記録する（通知は 1 回だけ）
+    _dir_fsync_warned.add(purpose)  # この用途は警告済みとして記録する（集合なので global 宣言は不要）
     logging.warning(
-        "%s (%s): %s — 保存内容は書けていますが、電源断で直前の保存が失われる可能性があります。",
-        what, directory, error,
-    )  # 耐性が失われている事実と、データ自体は無事であることの両方を伝える
+        "%s (%s): %s — %s", what, directory, error, _DIR_FSYNC_CONSEQUENCE[purpose],
+    )  # 耐性が失われている事実と、その用途で何が起きうるかを併せて伝える
 
 
 def _make_directory_durable(directory: str) -> None:
@@ -203,7 +221,7 @@ def _make_directory_durable(directory: str) -> None:
         _fsync_directory(os.path.dirname(created) or ".")  # 新しく作った階層の名前を、その親を fsync して確定させる
 
 
-def _fsync_directory(directory: str) -> None:
+def _fsync_directory(directory: str, purpose: str = _DIR_FSYNC_SAVE) -> None:
     """ディレクトリ自身を fsync し、その中で行った改名（os.replace）を確定させる。
 
     ファイル本体を fsync しても、それは「ファイルの中身」がディスクへ届いた保証にすぎず、
@@ -245,17 +263,17 @@ def _fsync_directory(directory: str) -> None:
     だけで保存の成否とは無関係なので、種類を問わず記録して飲み込むのが正しい
     （§6 の「握り潰さない」に対しては、飲み込む代わりに必ず記録することで応じている）。
     """
-    if os.name != "posix":  # Windows など、ディレクトリを fsync できず、かつその必要も無い環境の場合
-        return  # os.replace（MoveFileEx）がメタデータを同期更新するので何もしない
+    if not _SUPPORTS_DIRECTORY_FSYNC:  # Windows など、ディレクトリを fsync する手段が無い環境の場合
+        return  # 手段が無いので何もしない（不要だからではない。上の「Windows に残る限界」を参照）
     try:
         fd = os.open(directory, os.O_RDONLY)  # ディレクトリ自身を読み取り専用で開いてファイルディスクリプタを得る
     except Exception as e:  # POSIX なのに開けない場合（マウントや LSM の制限など、想定外）
-        _warn_dir_fsync_unavailable("ディレクトリを開けないため fsync を省略しました", directory, e)  # 耐性が失われたことを 1 回だけ警告する（§6）
+        _warn_dir_fsync_unavailable("ディレクトリを開けないため fsync を省略しました", directory, e, purpose)  # 耐性が失われたことを用途ごとに 1 回だけ警告する（§6）
         return  # 改名自体は完了しているので、確定できなくてもそのまま続行する
     try:
         os.fsync(fd)  # ディレクトリエントリ（名前→中身の対応）をディスクへ確定させる
     except Exception as e:  # ディレクトリの fsync に対応しないファイルシステムなどの場合
-        _warn_dir_fsync_unavailable("ディレクトリの fsync に失敗しました", directory, e)  # 耐性が失われたことを 1 回だけ警告する（§6）
+        _warn_dir_fsync_unavailable("ディレクトリの fsync に失敗しました", directory, e, purpose)  # 耐性が失われたことを用途ごとに 1 回だけ警告する（§6）
     finally:
         try:
             os.close(fd)  # 例外の有無にかかわらずファイルディスクリプタを必ず閉じる（§8 リソースの解放）

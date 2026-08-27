@@ -667,8 +667,11 @@ class AtomicWriteDurabilityTests(unittest.TestCase):
 # Windows 側の分岐（省略しても保存は成功し、警告にもしない）は os.name を差し替える
 # test_windows_skips_without_attempting_to_open / test_directory_open_failure_does_not_fail_save が
 # 全 OS で検証するので、Windows でも「省略してよい」という契約は無検査にならない。
+# スキップ判定は config 側の定数を唯一の真実の源とする。ここで os.name を独自に見ると、
+# 「どの環境で実際に fsync を試みるか」の判断が本体と検査で二重管理になり、片方だけ
+# 変えたときに黙って食い違う（実際、定数だけを差し替えた模擬実行でこの食い違いが出た）。
 _posix_only = unittest.skipUnless(
-    os.name == "posix", "ディレクトリの fsync は POSIX でのみ行う（Windows は os.replace が同期更新）"
+    config._SUPPORTS_DIRECTORY_FSYNC, "ディレクトリの fsync が可能な環境でのみ意味を持つ検査"
 )
 
 
@@ -685,7 +688,7 @@ class DirectoryFsyncTests(unittest.TestCase):
         # 後続のテスト（別クラス・別ファイル）へ置き土産にし、単体では通るのに全体実行では
         # 落ちる順序依存の不安定テストを生む。addCleanup で元の値へ必ず戻す。
         self.addCleanup(setattr, config, "_dir_fsync_warned", config._dir_fsync_warned)
-        config._dir_fsync_warned = False
+        config._dir_fsync_warned = set()
 
     @contextlib.contextmanager
     def _captured_warnings(self):
@@ -704,16 +707,42 @@ class DirectoryFsyncTests(unittest.TestCase):
             yield records  # 収集中のリストを呼び出し側へ渡す
         finally:
             root.removeHandler(handler)  # テストの後始末として必ず取り外す（他テストへ漏らさない）
+            handler.close()  # logging がプロセス全体で保持する一覧からも外す（§8 リソースの解放）
 
-    def _assert_no_save_failure_reported(self, records):
+    def _assert_no_save_failure_reported(self, records, expect_durability_warning):
         """「保存に失敗しました」という誤報が出ていないことを確かめる。
 
         内容が読み戻せることだけでは不十分。例外が _fsync_directory から漏れても
         save_tasks の except Exception が飲み込むため中身は保存済みのままになり、
         実害は「成功しているのに失敗と言われる」ことだけになるため。
+
+        expect_durability_warning には「注入した失敗が耐久性の警告を出すはずか」を渡す。
+        True なら陽性対照として警告の存在も確かめる: 「無いこと」だけを見ると、注入した
+        失敗にそもそも到達していない環境（非 POSIX では _fsync_directory が即 return する）
+        でも空リストとして素通りし、検査が何も確かめないまま緑になるため。
+        close の失敗だけは仕様どおりデバッグログに留めるので False を渡す。
         """
         reported = [r.getMessage() for r in records if "保存に失敗しました" in r.getMessage()]  # 誤報だけを抽出する
         self.assertEqual(reported, [], "保存は成功しているのに失敗として報告されている")  # 1 件でもあれば失敗させる
+        if expect_durability_warning and config._SUPPORTS_DIRECTORY_FSYNC:  # 警告が出るはずの環境でのみ
+            self.assertTrue(any("電源断" in r.getMessage() for r in records),
+                            "注入した失敗に到達しておらず、この検査は何も確かめていない")
+
+    def _record_synced_directories(self, synced):
+        """fsync 対象がディレクトリなら (デバイス番号, inode) を synced へ記録する差し替え関数を作る。
+
+        FD からは名前が分からないので識別子で控える。同じ組み立てが 3 箇所に増えたため
+        共通化した（§6 DRY）。ディレクトリの見分け方を変えるときはここだけ直せばよい。
+        """
+        real_fsync = os.fsync  # 差し替え前の本物の fsync を先に捕まえておく
+
+        def _record(fd):
+            info = os.fstat(fd)  # そのFDが指す対象の情報を取得する
+            if stat.S_ISDIR(info.st_mode):  # ディレクトリだった場合のみ
+                synced.append((info.st_dev, info.st_ino))  # 識別子を記録する
+            return real_fsync(fd)  # 記録した後は本物の fsync をそのまま実行する
+
+        return _record  # 差し替え用の関数を返す
 
     def _record_fsync_targets(self, targets):
         """os.fsync の呼び出し先が「ディレクトリかどうか」を targets へ記録する差し替え関数を作る。"""
@@ -773,21 +802,14 @@ class DirectoryFsyncTests(unittest.TestCase):
         # 初回起動（保存先ディレクトリがまだ無い）で、作成したディレクトリの「存在」も確定すること。
         # ディレクトリ名は親のエントリなので、親を fsync しないと電源断でディレクトリごと消え、
         # 中のファイルをどれだけ丁寧に fsync していても入力内容が丸ごと失われる。
-        real_fsync = os.fsync  # 差し替え前の本物の os.fsync を捕まえておく
         synced_dirs = []  # fsync されたディレクトリを (デバイス番号, inode) で記録するリスト
-
-        def _record(fd):
-            info = os.fstat(fd)  # そのFDが指す対象の情報を取得する
-            if stat.S_ISDIR(info.st_mode):  # ディレクトリだった場合のみ
-                synced_dirs.append((info.st_dev, info.st_ino))  # FD からは名前が分からないので識別子で記録する
-            return real_fsync(fd)  # 実際に同期する
 
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = os.path.join(tmpdir, "reminder")  # まだ存在しない保存先ディレクトリ
             tasks_path = os.path.join(config_dir, "tasks.json")
             with patch("reminder.config._TASKS_PATH", tasks_path), \
                  patch("reminder.config._CONFIG_DIR", config_dir), \
-                 patch("reminder.config.os.fsync", side_effect=_record):
+                 patch("reminder.config.os.fsync", side_effect=self._record_synced_directories(synced_dirs)):
                 save_tasks([Task(title="保存", due="2026-06-06T09:00:00")])
             parent = os.stat(tmpdir)  # 新規作成した config_dir の親（~/.config 相当）
             self.assertIn((parent.st_dev, parent.st_ino), synced_dirs,
@@ -824,7 +846,7 @@ class DirectoryFsyncTests(unittest.TestCase):
             with patch("reminder.config._TASKS_PATH", tasks_path):
                 loaded = load_tasks()  # 差し替えを解除した状態で読み直し、内容が保存されているか確かめる
         self.assertEqual([t.title for t in loaded], ["保存"])
-        self._assert_no_save_failure_reported(records)
+        self._assert_no_save_failure_reported(records, expect_durability_warning=True)
 
     def test_directory_open_failure_does_not_fail_save(self):
         # Windows のようにディレクトリを os.open できない環境でも、保存が成功扱いのままであること
@@ -845,7 +867,7 @@ class DirectoryFsyncTests(unittest.TestCase):
             with patch("reminder.config._TASKS_PATH", tasks_path):
                 loaded = load_tasks()  # 差し替えを解除した状態で読み直し、内容が保存されているか確かめる
         self.assertEqual([t.title for t in loaded], ["保存"])
-        self._assert_no_save_failure_reported(records)
+        self._assert_no_save_failure_reported(records, expect_durability_warning=True)
 
     @_posix_only
     def test_directory_fsync_closes_descriptor(self):
@@ -900,27 +922,47 @@ class DirectoryFsyncTests(unittest.TestCase):
         # 壊れたファイルの退避（.corrupt への改名）も、保存と同じくディレクトリを fsync すること。
         # このモジュールの改名は 2 箇所（原子的書き込みと隔離）にあり、片方だけ確定させると
         # 「このモジュールの改名は確定済み」という不変条件が場所によって崩れる。
-        real_fsync = os.fsync  # 差し替え前の本物の os.fsync を捕まえておく
         synced_dirs = []  # fsync されたディレクトリを (デバイス番号, inode) で記録するリスト
-
-        def _record(fd):
-            info = os.fstat(fd)  # そのFDが指す対象の情報を取得する
-            if stat.S_ISDIR(info.st_mode):  # ディレクトリだった場合のみ
-                synced_dirs.append((info.st_dev, info.st_ino))  # FD からは名前が分からないので識別子で記録する
-            return real_fsync(fd)  # 実際に同期する
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tasks_path = os.path.join(tmpdir, "tasks.json")
             with open(tasks_path, "w", encoding="utf-8") as f:
                 f.write("{壊れた JSON")  # 読み込めない内容を書いて隔離を誘発する
             with patch("reminder.config._TASKS_PATH", tasks_path), \
-                 patch("reminder.config.os.fsync", side_effect=_record), \
+                 patch("reminder.config.os.fsync", side_effect=self._record_synced_directories(synced_dirs)), \
                  self._captured_warnings():  # 隔離の警告ログはここでは検査しないので捨てる
                 self.assertEqual(load_tasks(), [])  # 壊れているので空リストへフォールバックする
             self.assertTrue(os.path.exists(tasks_path + ".corrupt"), "退避ファイルが作られていない")
             directory = os.stat(tmpdir)  # 改名が起きたディレクトリ
             self.assertIn((directory.st_dev, directory.st_ino), synced_dirs,
                           "隔離の改名がディスクへ確定されていない")
+
+    def test_quarantine_warning_does_not_claim_a_save_is_at_risk(self):
+        # 隔離（.corrupt への改名）の警告で「直前の保存が失われる」と言ってはいけない。
+        # 保存していないのに保存が危ういと誤解させるうえ、実際に起きうるのは退避の巻き戻りだけ。
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch("reminder.config._SUPPORTS_DIRECTORY_FSYNC", True), \
+             patch("reminder.config.os.open", side_effect=OSError("開けない")), \
+             self.assertLogs("root", level="WARNING") as captured:
+            config._fsync_directory(tmpdir, config._DIR_FSYNC_QUARANTINE)  # 隔離の用途で省略を起こす
+        message = captured.output[0]  # 出力された警告文
+        self.assertIn("退避", message, "何の改名が危ういのかが伝わらない")
+        self.assertNotIn("直前の保存が失われる", message, "保存していないのに保存が危ういと誤解させている")
+
+    def test_quarantine_warning_does_not_consume_the_save_budget(self):
+        # 「1 回だけ」の予算は用途ごとに分かれていること。
+        # 共有していると、起動時の隔離（データは失われない）が唯一の枠を使い切り、以降は
+        # 保存側（実際にデータが危ういのはこちら）の警告が二度と出なくなる。
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch("reminder.config._SUPPORTS_DIRECTORY_FSYNC", True), \
+             patch("reminder.config.os.open", side_effect=OSError("開けない")):
+            with self.assertLogs("root", level="WARNING"):
+                config._fsync_directory(tmpdir, config._DIR_FSYNC_QUARANTINE)  # 先に隔離側で 1 回使う
+            with self.assertLogs("root", level="WARNING") as captured:
+                config._fsync_directory(tmpdir)  # 保存側は別枠なのでまだ警告できるはず
+            self.assertIn("直前の保存が失われる", captured.output[0], "保存側の警告が隔離に食われている")
+            with self.assertNoLogs("root", level="WARNING"):
+                config._fsync_directory(tmpdir)  # 同じ用途の 2 回目は繰り返さない
 
     def test_non_oserror_does_not_escape_either(self):
         # 「この関数は例外を投げない」という約束を、例外の種類の見積もりに頼らず守ること。
@@ -954,13 +996,15 @@ class DirectoryFsyncTests(unittest.TestCase):
             with patch("reminder.config._TASKS_PATH", tasks_path):
                 loaded = load_tasks()  # 差し替えを解除した状態で読み直す
         self.assertEqual([t.title for t in loaded], ["保存"])
-        self._assert_no_save_failure_reported(records)
+        # close の失敗は「後始末が失敗しただけ」で耐久性は確保できているため、仕様どおり
+        # デバッグログに留まる。よってここでは耐久性の警告を期待しない。
+        self._assert_no_save_failure_reported(records, expect_durability_warning=False)
 
     def test_posix_skip_warns_once_then_falls_back_to_debug(self):
         # POSIX では省略＝電源断耐性が失われた状態なので、デバッグに埋もれさせず警告で知らせること。
         # ただし保存のたびに鳴らさないよう、警告はセッション中 1 回だけであること。
         with tempfile.TemporaryDirectory() as tmpdir, \
-             patch("reminder.config.os.name", "posix"), \
+             patch("reminder.config._SUPPORTS_DIRECTORY_FSYNC", True), \
              patch("reminder.config.os.open", side_effect=PermissionError("マウントの制限")):
             with self.assertLogs("root", level="WARNING") as captured:
                 config._fsync_directory(tmpdir)  # 1 回目は警告が出るはず
@@ -980,7 +1024,7 @@ class DirectoryFsyncTests(unittest.TestCase):
             return real_open(path, flags, *args, **kwargs)  # 実際に開く
 
         with tempfile.TemporaryDirectory() as tmpdir, \
-             patch("reminder.config.os.name", "nt"), \
+             patch("reminder.config._SUPPORTS_DIRECTORY_FSYNC", False), \
              patch("reminder.config.os.open", side_effect=_record_open), \
              self.assertNoLogs("root", level="WARNING"):
             config._fsync_directory(tmpdir)  # 非 POSIX では何も試みずに戻るはず
