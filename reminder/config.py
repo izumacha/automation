@@ -152,27 +152,51 @@ def _preserve_corrupt_file(path: str) -> None:
 _dir_fsync_warned = False  # POSIX でのディレクトリ fsync 省略をすでに警告したか
 
 
-def _report_dir_fsync_skipped(what: str, directory: str, error: OSError) -> None:
-    """ディレクトリ fsync を省略した事実を、実行環境に応じた深刻度で記録する。
+def _warn_dir_fsync_unavailable(what: str, directory: str, error: OSError) -> None:
+    """POSIX でディレクトリ fsync を省略した事実を、セッション中 1 回だけ警告として記録する。
 
-    Windows ではディレクトリを fsync できないが、os.replace（MoveFileEx）が
-    メタデータを同期的に更新するため省略は**想定内**であり、デバッグログで十分。
-
-    一方 POSIX で省略が起きるのは想定外（SELinux/AppArmor の拒否、FUSE 系ホーム、
-    制限の強いコンテナのマウントなど）で、そのとき失われるのは
-    まさに _fsync_directory が足そうとした電源断耐性そのものである。デバッグログに
-    落とすと cli.py が INFO で起動する以上ユーザーには一生見えないため、警告として
-    残す（§6 エラーを握り潰さない）。ただし保存のたびに鳴らさないよう 1 回だけにする。
+    呼ばれるのは POSIX だけ（_fsync_directory が非 POSIX を早期 return するため）。
+    POSIX で省略が起きるのは想定外（SELinux/AppArmor の拒否、FUSE 系ホーム、制限の強い
+    コンテナのマウントなど）で、そのとき失われるのはまさに _fsync_directory が足そうと
+    した電源断耐性そのものである。デバッグログに落とすと cli.py が INFO で起動する以上
+    ユーザーには一生見えないため、警告として残す（§6 エラーを握り潰さない）。
+    ただし保存のたびに鳴らさないよう、警告は 1 回だけにして以降はデバッグに落とす。
     """
     global _dir_fsync_warned  # 「警告済み」フラグを書き換えるため global 宣言する
-    if os.name == "posix" and not _dir_fsync_warned:  # POSIX で、まだ警告していない場合のみ
-        _dir_fsync_warned = True  # このセッションでは警告済みであることを記録する（通知は 1 回だけ）
-        logging.warning(
-            "%s (%s): %s — 保存内容は書けていますが、電源断で直前の保存が失われる可能性があります。",
-            what, directory, error,
-        )  # 耐性が失われている事実と、データ自体は無事であることの両方を伝える
-        return  # 警告を出したのでデバッグログは重ねない
-    logging.debug("%s (%s): %s", what, directory, error)  # Windows（想定内）と 2 回目以降はデバッグログに留める
+    if _dir_fsync_warned:  # すでにこのセッションで警告済みの場合は
+        logging.debug("%s (%s): %s", what, directory, error)  # 繰り返しを避けてデバッグログに留める
+        return  # 警告は重ねない
+    _dir_fsync_warned = True  # このセッションでは警告済みであることを記録する（通知は 1 回だけ）
+    logging.warning(
+        "%s (%s): %s — 保存内容は書けていますが、電源断で直前の保存が失われる可能性があります。",
+        what, directory, error,
+    )  # 耐性が失われている事実と、データ自体は無事であることの両方を伝える
+
+
+def _make_directory_durable(directory: str) -> None:
+    """directory を作成し、**新しく作った階層**の親を fsync して存在を確定させる。
+
+    os.makedirs でディレクトリを作っただけでは、その「名前」は親ディレクトリの
+    エントリとして OS のメモリ上にしか無いことがある。この状態で電源が落ちると、
+    中のファイルを丁寧に fsync していてもディレクトリごと消える。初回起動
+    （~/.config/reminder がまだ無い状態）で保存した直後に電源が落ちると、
+    入力したタスクが丸ごと失われるのはこの経路である。
+
+    作成前に「どの階層が存在しないか」を控えておき、作成後に浅い方から順に
+    その親を fsync する。既にディレクトリが在る通常の保存では控えが空になるので、
+    余計な fsync は 1 回も増えない。
+    """
+    missing: list[str] = []  # これから新しく作られる（＝今は存在しない）階層を控えるリスト
+    probe = directory  # 存在確認をしながら上へ辿るための作業用パス
+    while probe and not os.path.isdir(probe):  # 存在しない階層をルート方向へ遡り続ける
+        missing.append(probe)  # この階層は新規作成されるので控えておく
+        parent = os.path.dirname(probe)  # 1 つ上の階層を求める
+        if parent == probe:  # ルート（"/" や "C:\\"）に到達してそれ以上遡れない場合
+            break  # 無限ループを避けて打ち切る
+        probe = parent  # 1 つ上の階層へ移って確認を続ける
+    os.makedirs(directory, exist_ok=True)  # 保存先ディレクトリが存在しない場合は作成する
+    for created in reversed(missing):  # 浅い階層から順に（親が確定してから子を確定させる）
+        _fsync_directory(os.path.dirname(created) or ".")  # 新しく作った階層の名前を、その親を fsync して確定させる
 
 
 def _fsync_directory(directory: str) -> None:
@@ -185,12 +209,15 @@ def _fsync_directory(directory: str) -> None:
     ディレクトリを開いて fsync すると、この改名そのものがディスクへ確定する。
 
     移植性（§10）: ディレクトリを開いて fsync できるのは POSIX（Linux / macOS）だけで、
-    Windows ではディレクトリを os.open できず PermissionError 等になる。ただし Windows の
-    os.replace（MoveFileEx）はメタデータを同期的に更新するため、この処理は不要である。
-    そのため失敗は「その環境では不要か、できないだけ」とみなし、記録を残して続行する。
-    ここで書き込み自体を失敗扱いにすると、中身は正しく置き換わっているのに save_* が
-    「保存に失敗」と誤報してしまう。記録の深刻度は環境によって変える
-    （_report_dir_fsync_skipped の docstring を参照）。
+    Windows ではディレクトリを os.open できない。ただし Windows の os.replace
+    （MoveFileEx）はメタデータを同期的に更新するため、この処理はそもそも不要である。
+    そこで非 POSIX では**何も試みずに戻る**。os.open を呼んで失敗から環境を察するより、
+    静的に分かっている前提をそのまま条件に書くほうが意図が読み取れるうえ、保存のたびに
+    「必ず失敗する呼び出し」と例外生成を繰り返さずに済む。
+
+    POSIX で失敗した場合は「できないだけ」とみなし、記録を残して続行する。ここで
+    書き込み自体を失敗扱いにすると、中身は正しく置き換わっているのに save_* が
+    「保存に失敗」と誤報してしまう（記録の方針は _warn_dir_fsync_unavailable を参照）。
 
     **この関数は例外を投げない。** 後始末の os.close も含めて捕捉する。呼び出し元
     （_atomic_write_json）はこの前提のうえで、改名成功後に無防備に呼んでいる。close は
@@ -198,15 +225,17 @@ def _fsync_directory(directory: str) -> None:
     「書き込みも改名も成功したのに保存失敗と誤報する」という、まさにこの関数が
     避けようとしている誤りが起きる。
     """
+    if os.name != "posix":  # Windows など、ディレクトリを fsync できず、かつその必要も無い環境の場合
+        return  # os.replace（MoveFileEx）がメタデータを同期更新するので何もしない
     try:
         fd = os.open(directory, os.O_RDONLY)  # ディレクトリ自身を読み取り専用で開いてファイルディスクリプタを得る
-    except OSError as e:  # Windows など、ディレクトリを開けない環境の場合
-        _report_dir_fsync_skipped("ディレクトリを開けないため fsync を省略しました", directory, e)  # 省略した理由を環境に応じた深刻度で記録する（§6）
+    except OSError as e:  # POSIX なのに開けない場合（マウントや LSM の制限など、想定外）
+        _warn_dir_fsync_unavailable("ディレクトリを開けないため fsync を省略しました", directory, e)  # 耐性が失われたことを 1 回だけ警告する（§6）
         return  # 改名自体は完了しているので、確定できなくてもそのまま続行する
     try:
         os.fsync(fd)  # ディレクトリエントリ（名前→中身の対応）をディスクへ確定させる
     except OSError as e:  # ディレクトリの fsync に対応しないファイルシステムなどの場合
-        _report_dir_fsync_skipped("ディレクトリの fsync に失敗しました", directory, e)  # 失敗理由を環境に応じた深刻度で記録する（§6）
+        _warn_dir_fsync_unavailable("ディレクトリの fsync に失敗しました", directory, e)  # 耐性が失われたことを 1 回だけ警告する（§6）
     finally:
         try:
             os.close(fd)  # 例外の有無にかかわらずファイルディスクリプタを必ず閉じる（§8 リソースの解放）
@@ -230,12 +259,14 @@ def _atomic_write_json(path: str, payload: object) -> None:
     置き換わる（§10 移植性）。失敗時は一時ファイルを後始末し、例外を呼び出し元へ
     再送出して save_* 側でログに残せるようにする。
 
-    電源断への耐性には fsync が 2 段階必要である。中身の fsync（下の os.fsync）だけでは
-    「新しい中身」しか確定せず、それを本番の名前へ結び付けた改名は確定しないため、
-    最後に _fsync_directory でディレクトリエントリも確定させる（詳細は同関数の docstring）。
+    電源断への耐性には fsync が 3 段階必要である。(1) 保存先ディレクトリを新規作成した
+    ときはその存在自体（_make_directory_durable）、(2) 一時ファイルの中身（下の os.fsync）、
+    (3) その中身を本番の名前へ結び付けた改名（最後の _fsync_directory）。1 つでも欠けると、
+    残りをどれだけ丁寧に同期しても、電源断でディレクトリごと消えたり改名だけが
+    巻き戻ったりする（詳細は各関数の docstring）。
     """
     directory = os.path.dirname(path) or "."  # 一時ファイルを本番ファイルと同じディレクトリに作るため親ディレクトリを取り出す（空なら現在地）
-    os.makedirs(directory, exist_ok=True)  # 保存先ディレクトリが存在しない場合は作成する
+    _make_directory_durable(directory)  # 保存先ディレクトリを作り、新規作成した階層はその存在自体も確定させる
     # delete=False ではなく mkstemp を使い、書き込み後に os.replace で本番へ差し替える
     fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".tmp-", suffix=".json")  # 同一ディレクトリ上に一時ファイルを作成しFDを得る
     try:
