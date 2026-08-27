@@ -389,15 +389,14 @@ def _atomic_write_json(path: str, payload: object) -> None:
     # delete=False ではなく mkstemp を使い、書き込み後に os.replace で本番へ差し替える
     fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".tmp-", suffix=".json")  # 同一ディレクトリ上に一時ファイルを作成しFDを得る
     try:
-        # os.fdopen が失敗した場合、fd の所有権はファイルオブジェクトへ移らない。
-        # 下の with に入れないままだと生の fd が誰にも閉じられずに残るため、ここで閉じる
-        # （失敗が繰り返されると fd を使い切る。§8 リソースの解放）。
-        try:
-            handle = os.fdopen(fd, "w", encoding="utf-8")  # 低レベルFDをUTF-8テキストファイルとして開く
-        except Exception:
-            os.close(fd)  # 所有権が移っていないので自分で閉じてから、下の共通後始末へ送る
-            raise  # 一時ファイルの削除は外側の except がまとめて行う
-        with handle as f:  # ファイルオブジェクトとして扱う（with 終了時に close される）
+        # os.fdopen の失敗時にここで os.close(fd) を足してはいけない（一度入れて戻した）。
+        # os.fdopen は io.open であり、渡した瞬間に fd の所有権を取って closefd=True の
+        # FileIO を作る。TextIOWrapper の生成などが失敗すると io.open 自身が内部で閉じるため、
+        # こちらでもう一度閉じると EBADF が except 節から送出されて **本当の失敗理由を覆い隠す**
+        # （実測: LookupError「unknown encoding」が OSError「Bad file descriptor」に化けた）。
+        # §6「例外は黙って捨てず、文脈を付けて再送出する」に反するうえ、fd 番号が再利用されて
+        # いれば無関係な fd を閉じる。所有権は io.open にあるので、こちらは何もしないのが正しい。
+        with os.fdopen(fd, "w", encoding="utf-8") as f:  # 低レベルFDをUTF-8テキストファイルとして開く（with終了時にcloseされる）
             json.dump(payload, f, ensure_ascii=False, indent=2)  # ペイロードをインデント付きJSONとして一時ファイルへ書き出す
             f.flush()  # PythonのバッファをOSへ確実に渡す
             os.fsync(f.fileno())  # OSバッファをディスクへ同期し、置き換え後に中身が空になる事故を防ぐ

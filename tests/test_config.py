@@ -1074,33 +1074,36 @@ class DirectoryFsyncTests(unittest.TestCase):
                 config._fsync_directory(not_a_directory, config._DirFsyncPurpose.SAVE)  # 例外は投げずに警告するはず
         self.assertIn("電源断", captured.output[0], "耐久性を得られなかったことが伝わっていない")
 
-    def test_fdopen_failure_closes_the_raw_descriptor(self):
-        # os.fdopen が失敗した場合、fd の所有権はファイルオブジェクトへ移らないので
-        # 自分で閉じないと生の fd が残る（失敗が繰り返されると fd を使い切る）。
+    def test_fdopen_failure_surfaces_the_real_cause_and_leaks_nothing(self):
+        # os.fdopen が失敗したときに、本当の失敗理由がそのまま呼び出し元へ届くこと。
+        # ここで気を利かせて os.close(fd) を足すと二重 close になり、EBADF が except 節から
+        # 送出されて原因が「Bad file descriptor」に化ける（実際に一度そう書いて戻した）。
+        # モックではなく**本物の os.fdopen を失敗させて**確かめる。所有権を取らないモックだと、
+        # どちらの実装でも通ってしまい誤った所有権モデルを固定してしまうため。
+        real_fdopen = os.fdopen  # 差し替え前の本物の os.fdopen を捕まえておく
         opened = []  # mkstemp が返したFDを記録するリスト
-        closed = []  # os.close に渡されたFDを記録するリスト
         real_mkstemp = tempfile.mkstemp  # 差し替え前の本物の mkstemp を捕まえておく
-        real_close = os.close  # 差し替え前の本物の os.close を捕まえておく
 
         def _record_mkstemp(*args, **kwargs):
             fd, path = real_mkstemp(*args, **kwargs)  # 実際に一時ファイルを作る
             opened.append(fd)  # 得られたFDを記録する
             return fd, path  # 呼び出し元へそのまま返す
 
-        def _record_close(fd):
-            closed.append(fd)  # 閉じられたFDを記録する
-            return real_close(fd)  # 実際に閉じる
+        def _fdopen_with_bad_codec(fd, *args, **kwargs):
+            # 存在しない文字コードを指定して、本物の io.open の失敗経路を通す
+            return real_fdopen(fd, "w", encoding="definitely-not-a-codec")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tasks_path = os.path.join(tmpdir, "tasks.json")
             with patch("reminder.config.tempfile.mkstemp", side_effect=_record_mkstemp), \
-                 patch("reminder.config.os.close", side_effect=_record_close), \
-                 patch("reminder.config.os.fdopen", side_effect=RuntimeError("fdopen 失敗")), \
-                 self.assertRaises(RuntimeError):
-                config._atomic_write_json(tasks_path, [])  # 書き込みは失敗し、例外は呼び出し元へ伝わる
+                 patch("reminder.config.os.fdopen", side_effect=_fdopen_with_bad_codec), \
+                 self.assertRaises(LookupError):  # OSError(EBADF) に化けていれば、ここで落ちる
+                config._atomic_write_json(tasks_path, [])
             leftovers = [n for n in os.listdir(tmpdir) if n.startswith(".tmp-")]
         self.assertEqual(len(opened), 1, "一時ファイルが 1 回だけ作られているはず")
-        self.assertIn(opened[0], closed, "fdopen 失敗時に生のファイルディスクリプタが閉じられていない")
+        # io.open が所有権を取って閉じているので、FD は閉じ済みでなければならない（漏れていない）
+        with self.assertRaises(OSError, msg="ファイルディスクリプタが閉じられていない"):
+            os.fstat(opened[0])
         self.assertEqual(leftovers, [], "失敗時に一時ファイルが残っている")
 
     def test_non_oserror_does_not_escape_either(self):
