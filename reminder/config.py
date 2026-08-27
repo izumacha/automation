@@ -58,6 +58,7 @@ _save_blocked_notified = False  # このセッションで保存拒否をすで�
 # （reminder.config.os は os モジュールそのものなので、patch すると全モジュールに効いてしまう）。
 _SUPPORTS_DIRECTORY_FSYNC = os.name == "posix"  # ディレクトリの fsync が可能な環境かどうか
 
+
 class _DirFsyncPurpose(enum.Enum):
     """ディレクトリ fsync を行う用途。**値は「省略されたときに何が起きうるか」の説明文**。
 
@@ -233,9 +234,7 @@ def _make_directory_durable(directory: str) -> None:
         _fsync_directory(os.path.dirname(created) or ".", _DirFsyncPurpose.CREATE)  # 新しく作った階層の名前を、その親を fsync して確定させる
 
 
-def _fsync_directory(
-    directory: str, purpose: _DirFsyncPurpose = _DirFsyncPurpose.SAVE
-) -> None:
+def _fsync_directory(directory: str, purpose: _DirFsyncPurpose) -> None:
     """ディレクトリ自身を fsync し、その中で行った改名（os.replace）を確定させる。
 
     ファイル本体を fsync しても、それは「ファイルの中身」がディスクへ届いた保証にすぎず、
@@ -260,6 +259,15 @@ def _fsync_directory(
     ctypes 等で Win32 を直接呼ぶ必要があるので、現時点では限界として明記するに留める
     （POSIX 側の穴は塞げているのに Windows も安全だと誤解されるのを防ぐため）。
 
+    **macOS に残る限界（既知の未解決事項）**: POSIX 側も完全ではない。macOS の fsync(2) は
+    データをドライバへ渡すだけで、ドライブ自身の揮発性キャッシュのフラッシュまでは要求しない
+    （Apple の man ページは、その保証が要るアプリは fcntl(F_FULLFSYNC) を使うよう明記している。
+    SQLite が F_FULLFSYNC を実装しているのはこのため）。CPython の os.fsync は F_FULLFSYNC を
+    発行しないので、**macOS では電源断で改名もファイル内容も失われる可能性が残る**。
+    塞ぐなら fcntl.fcntl(fd, F_FULLFSYNC) を使うことになるが、性能への影響が大きく、
+    手元に検証環境が無いため今は限界として明記するに留める。Windows の項と同じ理由で、
+    「POSIX なら安全」と誤解されるのを防ぐために書いている。
+
     POSIX で失敗した場合は「できないだけ」とみなし、記録を残して続行する。ここで
     書き込み自体を失敗扱いにすると、中身は正しく置き換わっているのに save_* が
     「保存に失敗」と誤報してしまう（記録の方針は _warn_dir_fsync_unavailable を参照）。
@@ -280,7 +288,11 @@ def _fsync_directory(
     if not _SUPPORTS_DIRECTORY_FSYNC:  # Windows など、ディレクトリを fsync する手段が無い環境の場合
         return  # 手段が無いので何もしない（不要だからではない。上の「Windows に残る限界」を参照）
     try:
-        fd = os.open(directory, os.O_RDONLY)  # ディレクトリ自身を読み取り専用で開いてファイルディスクリプタを得る
+        # O_DIRECTORY を添える。これが無いと、相手が（将来の呼び出し間違いや、作成直後に
+        # 差し替えられた場合などで）ディレクトリでなくても os.open が成功してしまい、
+        # 別のオブジェクトを fsync して「確定した」つもりで戻る — 何も記録されないまま
+        # 耐久性を失う fail-open になる。付けておけば ENOTDIR が下の警告経路へ流れる。
+        fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))  # ディレクトリ自身を読み取り専用で開いてファイルディスクリプタを得る
     except Exception as e:  # POSIX なのに開けない場合（マウントや LSM の制限など、想定外）
         _warn_dir_fsync_unavailable("ディレクトリを開けないため fsync を省略しました", directory, e, purpose)  # 耐性が失われたことを用途ごとに 1 回だけ警告する（§6）
         return  # 改名自体は完了しているので、確定できなくてもそのまま続行する
@@ -316,6 +328,15 @@ def _atomic_write_json(path: str, payload: object) -> None:
     (3) その中身を本番の名前へ結び付けた改名（最後の _fsync_directory）。1 つでも欠けると、
     残りをどれだけ丁寧に同期しても、電源断でディレクトリごと消えたり改名だけが
     巻き戻ったりする（詳細は各関数の docstring）。
+
+    **代償（§8 と の兼ね合い）**: この関数 1 回あたりの同期的な fsync が 1 → 2 に増えた
+    （新規作成時はさらに増える）。呼び出しは Tk のメインスレッド上で起きるため、
+    たとえば PlannerApp._complete() は save_prefs と save_tasks を続けて呼ぶので、
+    チェック 1 回で 4 回の fsync が走る。回転ディスク・暗号化/FUSE のホーム・NFS 上の
+    ~/.config では、ジャーナルのコミット待ちで数百 ms 画面が止まりうる。耐久性のために
+    受け入れているトレードオフだが、体感が問題になるなら fsync を減らすのではなく、
+    _complete の 2 回の保存を 1 つの書き込み経路へまとめる（＝完了 1 回あたり 4 回でなく
+    2 回にする）方向で直すこと。fsync を外すと本関数の存在理由そのものが消える。
     """
     directory = os.path.dirname(path) or "."  # 一時ファイルを本番ファイルと同じディレクトリに作るため親ディレクトリを取り出す（空なら現在地）
     _make_directory_durable(directory)  # 保存先ディレクトリを作り、新規作成した階層はその存在自体も確定させる
@@ -336,7 +357,7 @@ def _atomic_write_json(path: str, payload: object) -> None:
         raise  # 元の例外を呼び出し元へ再送出し、save_* 側で警告ログに残せるようにする
     # ここへ来るのは os.replace が成功したときだけ（失敗時は上の except で再送出済み）。
     # 改名をディスクへ確定させる。_fsync_directory は例外を投げない（＝保存の成否を変えない）。
-    _fsync_directory(directory)  # ディレクトリエントリを fsync し、電源断で改名が巻き戻るのを防ぐ
+    _fsync_directory(directory, _DirFsyncPurpose.SAVE)  # ディレクトリエントリを fsync し、電源断で改名が巻き戻るのを防ぐ
 
 
 @dataclass

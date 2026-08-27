@@ -730,6 +730,24 @@ class DirectoryFsyncTests(unittest.TestCase):
                             "注入した失敗に到達しておらず、この検査は何も確かめていない")
 
     @staticmethod
+    def _fail_open_for_directories(error):
+        """ディレクトリを開こうとしたときだけ error を送出する os.open の差し替えを作る。
+
+        os.open を無条件に潰すと、reminder.config.os は os モジュールそのものなので
+        そのブロック中はインタプリタ全体の os.open が失敗する。遅延 import や codec の
+        読み込みが巻き込まれると、検査対象と無関係な失敗が「対象コードのバグ」に見える。
+        ディレクトリ以外は本物へ委ねることで、影響を検査したい経路だけに閉じ込める。
+        """
+        real_open = os.open  # 差し替え前の本物の os.open を捕まえておく
+
+        def _open(path, flags, *args, **kwargs):
+            if os.path.isdir(path):  # 開こうとしている対象がディレクトリの場合のみ
+                raise error  # 指定された失敗を再現する
+            return real_open(path, flags, *args, **kwargs)  # ファイルは通常どおり開く
+
+        return _open  # 差し替え用の関数を返す
+
+    @staticmethod
     def _is_directory_fd(fd):
         """ファイルディスクリプタがディレクトリを指すかどうかを返す。
 
@@ -908,7 +926,7 @@ class DirectoryFsyncTests(unittest.TestCase):
              patch("reminder.config.os.open", side_effect=_record_open), \
              patch("reminder.config.os.close", side_effect=_record_close), \
              patch("reminder.config.os.fsync", side_effect=OSError("fsync 非対応")):
-            config._fsync_directory(tmpdir)  # fsync が失敗する状況でディレクトリ同期を呼ぶ
+            config._fsync_directory(tmpdir, config._DirFsyncPurpose.SAVE)  # fsync が失敗する状況でディレクトリ同期を呼ぶ
         self.assertEqual(len(opened), 1, "ディレクトリが 1 回だけ開かれているはず")
         self.assertIn(opened[0], closed, "ディレクトリのファイルディスクリプタが閉じられていない")
 
@@ -925,7 +943,7 @@ class DirectoryFsyncTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir, \
              patch("reminder.config.os.close", side_effect=_close_then_fail):
-            config._fsync_directory(tmpdir)  # 例外が送出されなければテスト成功（送出されればここで落ちる）
+            config._fsync_directory(tmpdir, config._DirFsyncPurpose.SAVE)  # 例外が送出されなければテスト成功（送出されればここで落ちる）
 
     @_posix_only
     def test_fresh_install_fsyncs_every_created_level(self):
@@ -1002,13 +1020,13 @@ class DirectoryFsyncTests(unittest.TestCase):
         # 「保存内容は書けていますが」で始まるため、その時点では事実に反する。
         with tempfile.TemporaryDirectory() as tmpdir, \
              patch("reminder.config._SUPPORTS_DIRECTORY_FSYNC", True), \
-             patch("reminder.config.os.open", side_effect=OSError("開けない")):
+             patch("reminder.config.os.open", side_effect=self._fail_open_for_directories(OSError("開けない"))):
             with self.assertLogs("root", level="WARNING") as created:
                 config._fsync_directory(tmpdir, config._DirFsyncPurpose.CREATE)  # 先に作成側で 1 回使う
             self.assertIn("ディレクトリが電源断で消え", created.output[0], "作成時に何が起きうるかが伝わらない")
             self.assertNotIn("保存内容は書けています", created.output[0], "まだ書いていないのに書けたと言っている")
             with self.assertLogs("root", level="WARNING") as saved:
-                config._fsync_directory(tmpdir)  # 保存側は別枠なのでまだ警告できるはず
+                config._fsync_directory(tmpdir, config._DirFsyncPurpose.SAVE)  # 保存側は別枠なのでまだ警告できるはず
             self.assertIn("直前の保存が失われる", saved.output[0], "保存側の警告がディレクトリ作成に食われている")
 
     def test_quarantine_warning_does_not_claim_a_save_is_at_risk(self):
@@ -1016,7 +1034,7 @@ class DirectoryFsyncTests(unittest.TestCase):
         # 保存していないのに保存が危ういと誤解させるうえ、実際に起きうるのは退避の巻き戻りだけ。
         with tempfile.TemporaryDirectory() as tmpdir, \
              patch("reminder.config._SUPPORTS_DIRECTORY_FSYNC", True), \
-             patch("reminder.config.os.open", side_effect=OSError("開けない")), \
+             patch("reminder.config.os.open", side_effect=self._fail_open_for_directories(OSError("開けない"))), \
              self.assertLogs("root", level="WARNING") as captured:
             config._fsync_directory(tmpdir, config._DirFsyncPurpose.QUARANTINE)  # 隔離の用途で省略を起こす
         message = captured.output[0]  # 出力された警告文
@@ -1029,14 +1047,27 @@ class DirectoryFsyncTests(unittest.TestCase):
         # 保存側（実際にデータが危ういのはこちら）の警告が二度と出なくなる。
         with tempfile.TemporaryDirectory() as tmpdir, \
              patch("reminder.config._SUPPORTS_DIRECTORY_FSYNC", True), \
-             patch("reminder.config.os.open", side_effect=OSError("開けない")):
+             patch("reminder.config.os.open", side_effect=self._fail_open_for_directories(OSError("開けない"))):
             with self.assertLogs("root", level="WARNING"):
                 config._fsync_directory(tmpdir, config._DirFsyncPurpose.QUARANTINE)  # 先に隔離側で 1 回使う
             with self.assertLogs("root", level="WARNING") as captured:
-                config._fsync_directory(tmpdir)  # 保存側は別枠なのでまだ警告できるはず
+                config._fsync_directory(tmpdir, config._DirFsyncPurpose.SAVE)  # 保存側は別枠なのでまだ警告できるはず
             self.assertIn("直前の保存が失われる", captured.output[0], "保存側の警告が隔離に食われている")
             with self.assertNoLogs("root", level="WARNING"):
-                config._fsync_directory(tmpdir)  # 同じ用途の 2 回目は繰り返さない
+                config._fsync_directory(tmpdir, config._DirFsyncPurpose.SAVE)  # 同じ用途の 2 回目は繰り返さない
+
+    @_posix_only
+    def test_non_directory_target_is_not_silently_fsynced(self):
+        # 相手がディレクトリでなければ、黙って別物を fsync して「確定した」つもりで戻らないこと。
+        # O_DIRECTORY を付けないと os.open が普通のファイルにも成功してしまい、何も記録されない
+        # まま耐久性を失う fail-open になる（この関数は「黙って省略しない」ことが存在理由）。
+        with tempfile.TemporaryDirectory() as tmpdir:
+            not_a_directory = os.path.join(tmpdir, "not-a-dir")  # ディレクトリではない相手を用意する
+            with open(not_a_directory, "w", encoding="utf-8") as f:
+                f.write("")  # 中身は空でよい（存在してさえいればよい）
+            with self.assertLogs("root", level="WARNING") as captured:
+                config._fsync_directory(not_a_directory, config._DirFsyncPurpose.SAVE)  # 例外は投げずに警告するはず
+        self.assertIn("電源断", captured.output[0], "耐久性を得られなかったことが伝わっていない")
 
     def test_non_oserror_does_not_escape_either(self):
         # 「この関数は例外を投げない」という約束を、例外の種類の見積もりに頼らず守ること。
@@ -1044,9 +1075,9 @@ class DirectoryFsyncTests(unittest.TestCase):
         # ように別種が出る余地があり、1 つでも漏れれば呼び出し元が保存失敗と誤報する。
         with tempfile.TemporaryDirectory() as tmpdir, \
              patch("reminder.config._SUPPORTS_DIRECTORY_FSYNC", True), \
-             patch("reminder.config.os.open", side_effect=ValueError("embedded null byte")), \
+             patch("reminder.config.os.open", side_effect=self._fail_open_for_directories(ValueError("embedded null byte"))), \
              self._captured_warnings():  # 警告はここでは検査しないので、CI の出力を汚さないよう受け止める
-            config._fsync_directory(tmpdir)  # 例外が送出されなければテスト成功（送出されればここで落ちる）
+            config._fsync_directory(tmpdir, config._DirFsyncPurpose.SAVE)  # 例外が送出されなければテスト成功（送出されればここで落ちる）
 
     @_posix_only
     def test_save_does_not_report_failure_when_close_fails(self):
@@ -1081,12 +1112,12 @@ class DirectoryFsyncTests(unittest.TestCase):
         # ただし保存のたびに鳴らさないよう、警告はセッション中 1 回だけであること。
         with tempfile.TemporaryDirectory() as tmpdir, \
              patch("reminder.config._SUPPORTS_DIRECTORY_FSYNC", True), \
-             patch("reminder.config.os.open", side_effect=PermissionError("マウントの制限")):
+             patch("reminder.config.os.open", side_effect=self._fail_open_for_directories(PermissionError("マウントの制限"))):
             with self.assertLogs("root", level="WARNING") as captured:
-                config._fsync_directory(tmpdir)  # 1 回目は警告が出るはず
+                config._fsync_directory(tmpdir, config._DirFsyncPurpose.SAVE)  # 1 回目は警告が出るはず
             self.assertIn("電源断", captured.output[0])  # 何が失われるのかが警告文に含まれること
             with self.assertNoLogs("root", level="WARNING"):
-                config._fsync_directory(tmpdir)  # 2 回目以降は警告を繰り返さない
+                config._fsync_directory(tmpdir, config._DirFsyncPurpose.SAVE)  # 2 回目以降は警告を繰り返さない
 
     def test_windows_skips_without_attempting_to_open(self):
         # ディレクトリを fsync する手段が無い環境では、「開こうとして失敗する」のではなく
@@ -1107,7 +1138,7 @@ class DirectoryFsyncTests(unittest.TestCase):
              patch("reminder.config._SUPPORTS_DIRECTORY_FSYNC", False), \
              patch("reminder.config.os.open", side_effect=_record_open), \
              self.assertNoLogs("root", level="WARNING"):
-            config._fsync_directory(tmpdir)  # 非 POSIX では何も試みずに戻るはず
+            config._fsync_directory(tmpdir, config._DirFsyncPurpose.SAVE)  # 非 POSIX では何も試みずに戻るはず
         self.assertEqual(opened, [], "非 POSIX では os.open を試みるべきでない")
 
 
