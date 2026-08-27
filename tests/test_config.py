@@ -659,6 +659,17 @@ class AtomicWriteDurabilityTests(unittest.TestCase):
             self.assertEqual(loaded.sleep, "22:00")
 
 
+# ディレクトリを開いて fsync できるのは POSIX だけで、Windows では os.open が失敗する
+# （＝実際のディレクトリFDを必要とする検査は Windows では成立しない）。CI は
+# windows-latest でも走るため、実FDが要るテストだけをこのデコレータで POSIX 限定にする。
+# Windows 側の分岐（省略しても保存は成功し、警告にもしない）は os.name を差し替える
+# test_windows_skip_stays_at_debug / test_directory_open_failure_does_not_fail_save が
+# 全 OS で検証するので、Windows でも「省略してよい」という契約は無検査にならない。
+_posix_only = unittest.skipUnless(
+    os.name == "posix", "ディレクトリの fsync は POSIX でのみ行う（Windows は os.replace が同期更新）"
+)
+
+
 class DirectoryFsyncTests(unittest.TestCase):
     """改名（os.replace）を電源断から守るディレクトリ fsync のテスト。
 
@@ -680,6 +691,7 @@ class DirectoryFsyncTests(unittest.TestCase):
 
         return _record  # 差し替え用の関数を返す
 
+    @_posix_only
     def test_save_tasks_fsyncs_directory_entry(self):
         # 保存時に、ファイル本体だけでなくディレクトリ自身も fsync されること
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -692,6 +704,7 @@ class DirectoryFsyncTests(unittest.TestCase):
             self.assertTrue(any(fsync_targets), "ディレクトリエントリが fsync されていない（改名が電源断で巻き戻り得る）")
             self.assertIn(False, fsync_targets, "ファイル本体の fsync が失われている")
 
+    @_posix_only
     def test_save_prefs_fsyncs_directory_entry(self):
         # 設定ファイル側も同じ経路（_atomic_write_json）を通るのでディレクトリが fsync されること
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -741,6 +754,7 @@ class DirectoryFsyncTests(unittest.TestCase):
                 loaded = load_tasks()  # 差し替えを解除した状態で読み直し、内容が保存されているか確かめる
         self.assertEqual([t.title for t in loaded], ["保存"])
 
+    @_posix_only
     def test_directory_fsync_closes_descriptor(self):
         # fsync が失敗しても、開いたディレクトリのFDが必ず閉じられること（FDリークを防ぐ）
         opened = []  # _fsync_directory が開いたディレクトリのFDを記録するリスト
@@ -762,6 +776,7 @@ class DirectoryFsyncTests(unittest.TestCase):
         with self.assertRaises(OSError, msg="ディレクトリのファイルディスクリプタが閉じられていない"):
             os.fstat(opened[0])  # 閉じ済みのFDを stat すると EBADF で失敗する
 
+    @_posix_only
     def test_close_failure_does_not_escape(self):
         # 後始末の os.close が失敗しても、呼び出し元へ例外が漏れないこと。
         # 漏らすと _atomic_write_json の直後で送出され、書き込みも改名も成功しているのに
@@ -770,6 +785,7 @@ class DirectoryFsyncTests(unittest.TestCase):
              patch("reminder.config.os.close", side_effect=OSError("NFS の遅延 I/O エラー")):
             config._fsync_directory(tmpdir)  # 例外が送出されなければテスト成功（送出されればここで落ちる）
 
+    @_posix_only
     def test_save_does_not_report_failure_when_close_fails(self):
         # close 失敗が save_tasks まで波及しないこと。
         # 内容が読み戻せるかだけを見ても不十分で、例外が漏れても save_tasks の
