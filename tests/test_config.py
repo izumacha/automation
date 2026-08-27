@@ -948,11 +948,20 @@ class DirectoryFsyncTests(unittest.TestCase):
             with patch("reminder.config._TASKS_PATH", tasks_path), \
                  patch("reminder.config.os.fsync", side_effect=self._record_synced_directories(synced_dirs)):
                 save_tasks([Task(title="保存", due="2026-06-06T09:00:00")])
-            # 新しく作られた各階層について、その名前を保持する親が確定されているか確かめる
-            for created in (os.path.join(tmpdir, "config"), config_dir):
-                parent = os.stat(os.path.dirname(created))  # その階層の名前を持つ親ディレクトリ
-                self.assertIn((parent.st_dev, parent.st_ino), synced_dirs,
-                              f"新規作成した {created} の親が fsync されていない")
+            # 新しく作られた各階層の親が、**浅い方から順に**確定されていること。
+            # 順序も見るのは、深い方を先に確定させると「親のエントリが未確定なのに子だけが
+            # 確定済み」という、クラッシュ後に辿り着けない子が残る状態を許してしまうため。
+            # 集合としての一致だけを見る検査では reversed(missing) を外す退行を見逃す
+            # （実際に外しても全件緑のままだった）。最後に改名の確定（保存先そのもの）が続く。
+            def _ids(path):
+                info = os.stat(path)  # そのパスの識別子を取り出す
+                return (info.st_dev, info.st_ino)  # FD 経由の記録と突き合わせられる形にする
+
+            self.assertEqual(
+                synced_dirs,
+                [_ids(tmpdir), _ids(os.path.join(tmpdir, "config")), _ids(config_dir)],
+                "新規作成した階層は浅い方から順に確定させ、最後に改名を確定させること",
+            )
 
     @_posix_only
     def test_quarantine_rename_is_also_fsynced(self):
@@ -1081,16 +1090,19 @@ class DirectoryFsyncTests(unittest.TestCase):
         # モックではなく**本物の os.fdopen を失敗させて**確かめる。所有権を取らないモックだと、
         # どちらの実装でも通ってしまい誤った所有権モデルを固定してしまうため。
         real_fdopen = os.fdopen  # 差し替え前の本物の os.fdopen を捕まえておく
-        opened = []  # mkstemp が返したFDを記録するリスト
         real_mkstemp = tempfile.mkstemp  # 差し替え前の本物の mkstemp を捕まえておく
+        opened = []  # mkstemp が返した (FD, その時点の一時ファイルの識別子) を記録するリスト
 
         def _record_mkstemp(*args, **kwargs):
             fd, path = real_mkstemp(*args, **kwargs)  # 実際に一時ファイルを作る
-            opened.append(fd)  # 得られたFDを記録する
+            info = os.fstat(fd)  # そのFDが今どのファイルを指しているかを控える
+            opened.append((fd, (info.st_dev, info.st_ino)))  # FD と指し先の識別子を記録する
             return fd, path  # 呼び出し元へそのまま返す
 
         def _fdopen_with_bad_codec(fd, *args, **kwargs):
-            # 存在しない文字コードを指定して、本物の io.open の失敗経路を通す
+            # 存在しない文字コードを指定して、本物の io.open の失敗経路を通す。
+            # 所有権を取らないモックで代用すると、二重 close の実装でも通ってしまい
+            # 誤った所有権モデルを固定するため、ここは本物を通す。
             return real_fdopen(fd, "w", encoding="definitely-not-a-codec")
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1101,9 +1113,19 @@ class DirectoryFsyncTests(unittest.TestCase):
                 config._atomic_write_json(tasks_path, [])
             leftovers = [n for n in os.listdir(tmpdir) if n.startswith(".tmp-")]
         self.assertEqual(len(opened), 1, "一時ファイルが 1 回だけ作られているはず")
-        # io.open が所有権を取って閉じているので、FD は閉じ済みでなければならない（漏れていない）
-        with self.assertRaises(OSError, msg="ファイルディスクリプタが閉じられていない"):
-            os.fstat(opened[0])
+        # 「FD 番号がまだ有効か」だけで判定してはいけない。カーネルは最小の空き番号を
+        # 再利用するので、解放直後に何か（この検査自身が誘発する codec のロード等）が
+        # ファイルを開くと同じ番号が復活し、正しく閉じているのに落ちる。そこで**指し先**まで
+        # 見る: 閉じていれば番号は無効か別のファイルを指し、漏れていれば同じ一時ファイルを
+        # 指したままになる（一時ファイルは削除済みなので、他が同じ inode を開くことはない）。
+        fd, temp_file_ids = opened[0]  # 記録しておいたFDと、その時点の指し先
+        try:
+            still = os.fstat(fd)  # FD がまだ有効かどうか調べる
+        except OSError:
+            leaked = False  # 無効＝閉じられている
+        else:
+            leaked = (still.st_dev, still.st_ino) == temp_file_ids  # 同じ一時ファイルを指したままなら漏れている
+        self.assertFalse(leaked, "io.open が所有権を取ったFDを閉じていない")
         self.assertEqual(leftovers, [], "失敗時に一時ファイルが残っている")
 
     def test_non_oserror_does_not_escape_either(self):

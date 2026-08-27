@@ -193,6 +193,22 @@ def _preserve_corrupt_file(path: str) -> None:
     logging.warning("読み込めないファイルを %s へ退避しました。必要ならこのファイルから手動で復旧できます。", backup_path)  # 退避先の場所をユーザーへ知らせる
 
 
+def _claim_once_per_purpose(budget: set[_DirFsyncPurpose], purpose: _DirFsyncPurpose) -> bool:
+    """purpose がその予算枠をまだ使っていなければ確保して True を返す（2 回目以降は False）。
+
+    「用途ごとに 1 回だけ」という同じ門を、警告（_warn_dir_fsync_unavailable）と
+    省略の記録（_note_platform_cannot_fsync_directories）が別々の集合で持っている。
+    門の形まで二重に書くと、予算の方針を変えたときに片方だけ直してしまい、環境によって
+    枠の効き方が食い違う — 用途を分けて避けたはずの「危険な側が黙らされる」状態が、
+    今度は POSIX と非 POSIX の差として戻ってくる。門はここ 1 箇所にし、集合と
+    ログの出し方（水準・文面）だけを呼び出し側の違いとして残す（§6 DRY）。
+    """
+    if purpose in budget:  # この用途ではすでに枠を使い切っている場合は
+        return False  # 呼び出し側に「今回は出さない」と伝える
+    budget.add(purpose)  # 枠を確保したことを記録する
+    return True  # 呼び出し側に「今回は出してよい」と伝える
+
+
 def _note_platform_cannot_fsync_directories(purpose: _DirFsyncPurpose) -> None:
     """この環境ではディレクトリを fsync できないことを、用途ごとに 1 回だけ記録する。
 
@@ -211,9 +227,8 @@ def _note_platform_cannot_fsync_directories(purpose: _DirFsyncPurpose) -> None:
     恒久的な環境の性質で、起動のたびに警告を出しても行動につながらないため。障害の申告を
     受けた側がデバッグログを有効にすれば「この環境では確定できていなかった」と分かればよい。
     """
-    if purpose in _dir_fsync_platform_noted:  # この用途ではすでに記録済みなら
+    if not _claim_once_per_purpose(_dir_fsync_platform_noted, purpose):  # この用途ではすでに記録済みなら
         return  # 保存のたびに同じ行を出さない
-    _dir_fsync_platform_noted.add(purpose)  # この用途は記録済みとして覚えておく
     logging.debug(
         "この環境ではディレクトリを fsync できないため確定を省略します"
         "（os.name=%s, 用途=%s）。%s", os.name, purpose.name, purpose.value,
@@ -235,13 +250,12 @@ def _warn_dir_fsync_unavailable(
     purpose は _DirFsyncPurpose のいずれか。これが警告文の結び（何が起きうるか）と
     「1 回だけ」の予算の両方を決める（理由は _DirFsyncPurpose の docstring 参照）。
     """
-    if purpose in _dir_fsync_warned:  # この用途ではすでに警告済みの場合は
+    if not _claim_once_per_purpose(_dir_fsync_warned, purpose):  # この用途ではすでに警告済みの場合は
         # 用途名まで載せる。what は 2 種類しかなく 3 つの用途で共通なので、これを落とすと
         # 繰り返し失敗しているデバッグログを読んでも、保存・作成・隔離のどれが確定できて
         # いないのか区別できない（用途を分けて持っている意味が消える）。
         logging.debug("%s (%s, 用途=%s): %s", what, directory, purpose.name, error)  # 繰り返しを避けてデバッグログに留める
         return  # 警告は重ねない
-    _dir_fsync_warned.add(purpose)  # この用途は警告済みとして記録する（集合なので global 宣言は不要）
     logging.warning(
         "%s (%s): %s — %s", what, directory, error, purpose.value,
     )  # 耐性が失われている事実と、その用途で何が起きうるかを併せて伝える（値が説明文そのもの）
@@ -274,7 +288,11 @@ def _make_directory_durable(directory: str) -> None:
 
 
 def _fsync_directory(directory: str, purpose: _DirFsyncPurpose) -> None:
-    """ディレクトリ自身を fsync し、その中で行った改名（os.replace）を確定させる。
+    """ディレクトリ自身を fsync し、その中で行った変更（改名・作成）を確定させる。
+
+    確定させる対象は用途によって違う: SAVE / QUARANTINE は os.replace による改名、
+    CREATE は _make_directory_durable が作ったディレクトリの存在そのもの。どちらも
+    「親ディレクトリのエントリ」という同じものなので、同じ関数で扱える。
 
     ファイル本体を fsync しても、それは「ファイルの中身」がディスクへ届いた保証にすぎず、
     「どの名前がどの中身を指すか」（ディレクトリエントリ）はまだ OS のメモリ上にしか
@@ -311,8 +329,11 @@ def _fsync_directory(directory: str, purpose: _DirFsyncPurpose) -> None:
     書き込み自体を失敗扱いにすると、中身は正しく置き換わっているのに save_* が
     「保存に失敗」と誤報してしまう（記録の方針は _warn_dir_fsync_unavailable を参照）。
 
-    **この関数は例外を投げない。** 後始末の os.close も含めて捕捉する。呼び出し元
-    （_atomic_write_json）はこの前提のうえで、改名成功後に無防備に呼んでいる。close は
+    **この関数は例外を投げない。** 後始末の os.close も含めて捕捉する。呼び出し元は
+    3 つあり（_atomic_write_json の改名後・_preserve_corrupt_file の隔離後・
+    _make_directory_durable の作成後）、いずれもこの前提のうえで無防備に呼んでいる。
+    とくに _preserve_corrupt_file は起動時の読み込み経路なので、ここから例外が漏れると
+    壊れたファイルの隔離どころか起動そのものを巻き込む。close は
     NFS / FUSE 上で遅延した I/O エラーを報告することがあり、これを外へ漏らすと
     「書き込みも改名も成功したのに保存失敗と誤報する」という、まさにこの関数が
     避けようとしている誤りが起きる。
