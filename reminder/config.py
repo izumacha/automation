@@ -83,6 +83,7 @@ class _DirFsyncPurpose(enum.Enum):
 # POSIX では 1 回だけ警告として知らせる（保存のたびに鳴らすとうるさいため、
 # _save_blocked_notified と同じ「1 回だけ」方式にする）。予算は上記のとおり用途ごと。
 _dir_fsync_warned: set[_DirFsyncPurpose] = set()  # すでに警告した用途の集合
+_dir_fsync_platform_noted = False  # 「この環境では fsync できない」ことをすでに記録したか
 
 
 def set_save_blocked_listener(listener: SaveBlockedListener | None) -> None:
@@ -184,6 +185,28 @@ def _preserve_corrupt_file(path: str) -> None:
     logging.warning("読み込めないファイルを %s へ退避しました。必要ならこのファイルから手動で復旧できます。", backup_path)  # 退避先の場所をユーザーへ知らせる
 
 
+def _note_platform_cannot_fsync_directories() -> None:
+    """この環境ではディレクトリを fsync できないことを、セッション中 1 回だけ記録する。
+
+    このモジュールの方針は「耐久性を確保できなかったら黙って省略しない」で、POSIX 側の
+    失敗は _warn_dir_fsync_unavailable が警告として残す。手段が無い環境（Windows）だけが
+    無記録の no-op のままだと、電源断で保存が巻き戻ったときにログへ手がかりが 1 つも残らず、
+    アプリの不具合と区別できない（§10 の「必ずフォールバックを用意する」）。
+
+    水準を警告ではなくデバッグにしているのは、これがユーザーには対処しようのない
+    恒久的な環境の性質で、起動のたびに警告を出しても行動につながらないため。障害の申告を
+    受けた側がデバッグログを有効にすれば「この環境では確定できていなかった」と分かればよい。
+    """
+    global _dir_fsync_platform_noted  # 「記録済み」フラグを書き換えるため global 宣言する
+    if _dir_fsync_platform_noted:  # すでにこのセッションで記録済みなら
+        return  # 保存のたびに同じ行を出さない
+    _dir_fsync_platform_noted = True  # このセッションでは記録済みであることを覚えておく
+    logging.debug(
+        "この環境ではディレクトリを fsync できないため、改名の確定を省略します"
+        "（os.name=%s）。電源断で直前の保存が巻き戻る可能性があります。", os.name,
+    )  # 省略している事実と、その結果起こりうることを残す
+
+
 def _warn_dir_fsync_unavailable(
     what: str, directory: str, error: Exception, purpose: _DirFsyncPurpose
 ) -> None:
@@ -200,7 +223,10 @@ def _warn_dir_fsync_unavailable(
     「1 回だけ」の予算の両方を決める（理由は _DirFsyncPurpose の docstring 参照）。
     """
     if purpose in _dir_fsync_warned:  # この用途ではすでに警告済みの場合は
-        logging.debug("%s (%s): %s", what, directory, error)  # 繰り返しを避けてデバッグログに留める
+        # 用途名まで載せる。what は 2 種類しかなく 3 つの用途で共通なので、これを落とすと
+        # 繰り返し失敗しているデバッグログを読んでも、保存・作成・隔離のどれが確定できて
+        # いないのか区別できない（用途を分けて持っている意味が消える）。
+        logging.debug("%s (%s, 用途=%s): %s", what, directory, purpose.name, error)  # 繰り返しを避けてデバッグログに留める
         return  # 警告は重ねない
     _dir_fsync_warned.add(purpose)  # この用途は警告済みとして記録する（集合なので global 宣言は不要）
     logging.warning(
@@ -286,6 +312,7 @@ def _fsync_directory(directory: str, purpose: _DirFsyncPurpose) -> None:
     （§6 の「握り潰さない」に対しては、飲み込む代わりに必ず記録することで応じている）。
     """
     if not _SUPPORTS_DIRECTORY_FSYNC:  # Windows など、ディレクトリを fsync する手段が無い環境の場合
+        _note_platform_cannot_fsync_directories()  # 黙って no-op にせず、省略している事実をセッション中 1 回だけ残す
         return  # 手段が無いので何もしない（不要だからではない。上の「Windows に残る限界」を参照）
     try:
         # O_DIRECTORY を添える。これが無いと、相手が（将来の呼び出し間違いや、作成直後に

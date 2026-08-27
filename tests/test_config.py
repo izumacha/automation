@@ -690,6 +690,10 @@ class DirectoryFsyncTests(unittest.TestCase):
         # 戻すので、このクラスが空集合へ差し替えている間に溜めた用途は持ち出されない。
         self.addCleanup(setattr, config, "_dir_fsync_warned", config._dir_fsync_warned)
         config._dir_fsync_warned = set()
+        # 「この環境では fsync できない」ことの記録も同じくセッション中 1 回きりなので、
+        # 同様に元へ戻したうえで未記録から始める（テスト間の持ち越しを防ぐ）。
+        self.addCleanup(setattr, config, "_dir_fsync_platform_noted", config._dir_fsync_platform_noted)
+        config._dir_fsync_platform_noted = False
 
     @contextlib.contextmanager
     def _captured_warnings(self):
@@ -1118,6 +1122,19 @@ class DirectoryFsyncTests(unittest.TestCase):
             self.assertIn("電源断", captured.output[0])  # 何が失われるのかが警告文に含まれること
             with self.assertNoLogs("root", level="WARNING"):
                 config._fsync_directory(tmpdir, config._DirFsyncPurpose.SAVE)  # 2 回目以降は警告を繰り返さない
+
+    def test_platform_without_fsync_still_records_the_skip(self):
+        # 手段が無い環境でも「省略した」事実は記録されること（黙って no-op にしない）。
+        # ここだけ無記録だと、電源断で保存が巻き戻ったときログに手がかりが 1 つも残らず、
+        # アプリの不具合と区別できない。水準はデバッグ（ユーザーには対処しようがない
+        # 恒久的な環境の性質なので、起動のたびに警告を出しても行動につながらないため）。
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch("reminder.config._SUPPORTS_DIRECTORY_FSYNC", False), \
+             self.assertLogs("root", level="DEBUG") as captured:
+            config._fsync_directory(tmpdir, config._DirFsyncPurpose.SAVE)  # 省略される経路を通す
+            config._fsync_directory(tmpdir, config._DirFsyncPurpose.SAVE)  # 2 回目は繰り返さないはず
+        skips = [line for line in captured.output if "改名の確定を省略します" in line]
+        self.assertEqual(len(skips), 1, "省略の記録が無い、または保存のたびに繰り返している")
 
     def test_windows_skips_without_attempting_to_open(self):
         # ディレクトリを fsync する手段が無い環境では、「開こうとして失敗する」のではなく
