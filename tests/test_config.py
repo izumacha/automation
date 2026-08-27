@@ -665,7 +665,7 @@ class AtomicWriteDurabilityTests(unittest.TestCase):
 # （＝実際のディレクトリFDを必要とする検査は Windows では成立しない）。CI は
 # windows-latest でも走るため、実FDが要るテストだけをこのデコレータで POSIX 限定にする。
 # Windows 側の分岐（省略しても保存は成功し、警告にもしない）は os.name を差し替える
-# test_windows_skip_stays_at_debug / test_directory_open_failure_does_not_fail_save が
+# test_windows_skips_without_attempting_to_open / test_directory_open_failure_does_not_fail_save が
 # 全 OS で検証するので、Windows でも「省略してよい」という契約は無検査にならない。
 _posix_only = unittest.skipUnless(
     os.name == "posix", "ディレクトリの fsync は POSIX でのみ行う（Windows は os.replace が同期更新）"
@@ -850,8 +850,17 @@ class DirectoryFsyncTests(unittest.TestCase):
     @_posix_only
     def test_directory_fsync_closes_descriptor(self):
         # fsync が失敗しても、開いたディレクトリのFDが必ず閉じられること（FDリークを防ぐ）
+        # 「開いたディレクトリのFD」と「閉じるよう要求されたFD」を突き合わせて漏れを見る。
+        # FD 番号そのものの状態（os.fstat が EBADF になるか）で判定してはいけない: カーネルは
+        # 最小の空き番号を再利用するため、解放直後に何か（遅延 import・codec のロード・
+        # TemporaryDirectory の後始末の os.scandir 等）がファイルを開くと同じ番号が復活し、
+        # 正しく閉じているのに「閉じられていない」と落ちる非決定的な失敗になる。
+        # 呼び出し回数ではなく「その FD が含まれるか」で見るので、os は全プロセス共有だが
+        # 無関係な os.close を巻き込むこともない。
         opened = []  # _fsync_directory が開いたディレクトリのFDを記録するリスト
+        closed = []  # os.close に渡されたFDを記録するリスト
         real_open = os.open  # 差し替え前の本物の os.open を捕まえておく
+        real_close = os.close  # 差し替え前の本物の os.close を捕まえておく
 
         def _record_open(path, flags, *args, **kwargs):
             fd = real_open(path, flags, *args, **kwargs)  # 実際に開く
@@ -859,19 +868,17 @@ class DirectoryFsyncTests(unittest.TestCase):
                 opened.append(fd)  # そのFDを記録する（他所の os.open 呼び出しは数えない）
             return fd  # 開いたFDを呼び出し元へ返す
 
+        def _record_close(fd):
+            closed.append(fd)  # 閉じるよう要求されたFDを記録する
+            return real_close(fd)  # 実際に閉じる（FDを漏らさない）
+
         with tempfile.TemporaryDirectory() as tmpdir, \
              patch("reminder.config.os.open", side_effect=_record_open), \
+             patch("reminder.config.os.close", side_effect=_record_close), \
              patch("reminder.config.os.fsync", side_effect=OSError("fsync 非対応")):
             config._fsync_directory(tmpdir)  # fsync が失敗する状況でディレクトリ同期を呼ぶ
-            self.assertEqual(len(opened), 1, "ディレクトリが 1 回だけ開かれているはず")
-            # 閉じられたことを os.close の呼び出し回数ではなくFD自身の状態で確かめる。
-            # 回数を数えると、無関係な os.close（os は全プロセス共有のため）まで拾ってしまう。
-            # 判定は _fsync_directory の直後、まだ何もFD番号を確保していないこの位置で行う。
-            # ブロックを抜けてからだと TemporaryDirectory の後始末（os.scandir）が最小の
-            # 空き番号＝いま解放されたばかりの番号を掴み、閉じているのに fstat が成功して
-            # 「閉じられていない」と誤って落ちうるため。
-            with self.assertRaises(OSError, msg="ディレクトリのファイルディスクリプタが閉じられていない"):
-                os.fstat(opened[0])  # 閉じ済みのFDを stat すると EBADF で失敗する
+        self.assertEqual(len(opened), 1, "ディレクトリが 1 回だけ開かれているはず")
+        self.assertIn(opened[0], closed, "ディレクトリのファイルディスクリプタが閉じられていない")
 
     @_posix_only
     def test_close_failure_does_not_escape(self):
@@ -887,6 +894,33 @@ class DirectoryFsyncTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir, \
              patch("reminder.config.os.close", side_effect=_close_then_fail):
             config._fsync_directory(tmpdir)  # 例外が送出されなければテスト成功（送出されればここで落ちる）
+
+    @_posix_only
+    def test_quarantine_rename_is_also_fsynced(self):
+        # 壊れたファイルの退避（.corrupt への改名）も、保存と同じくディレクトリを fsync すること。
+        # このモジュールの改名は 2 箇所（原子的書き込みと隔離）にあり、片方だけ確定させると
+        # 「このモジュールの改名は確定済み」という不変条件が場所によって崩れる。
+        real_fsync = os.fsync  # 差し替え前の本物の os.fsync を捕まえておく
+        synced_dirs = []  # fsync されたディレクトリを (デバイス番号, inode) で記録するリスト
+
+        def _record(fd):
+            info = os.fstat(fd)  # そのFDが指す対象の情報を取得する
+            if stat.S_ISDIR(info.st_mode):  # ディレクトリだった場合のみ
+                synced_dirs.append((info.st_dev, info.st_ino))  # FD からは名前が分からないので識別子で記録する
+            return real_fsync(fd)  # 実際に同期する
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tasks_path = os.path.join(tmpdir, "tasks.json")
+            with open(tasks_path, "w", encoding="utf-8") as f:
+                f.write("{壊れた JSON")  # 読み込めない内容を書いて隔離を誘発する
+            with patch("reminder.config._TASKS_PATH", tasks_path), \
+                 patch("reminder.config.os.fsync", side_effect=_record), \
+                 self._captured_warnings():  # 隔離の警告ログはここでは検査しないので捨てる
+                self.assertEqual(load_tasks(), [])  # 壊れているので空リストへフォールバックする
+            self.assertTrue(os.path.exists(tasks_path + ".corrupt"), "退避ファイルが作られていない")
+            directory = os.stat(tmpdir)  # 改名が起きたディレクトリ
+            self.assertIn((directory.st_dev, directory.st_ino), synced_dirs,
+                          "隔離の改名がディスクへ確定されていない")
 
     def test_non_oserror_does_not_escape_either(self):
         # 「この関数は例外を投げない」という約束を、例外の種類の見積もりに頼らず守ること。

@@ -51,6 +51,11 @@ SaveBlockedListener = Callable[[str, "str | None"], None]  # UI 通知コール�
 _save_blocked_listener: SaveBlockedListener | None = None  # 保存拒否を通知する登録済みコールバック（未登録なら None）
 _save_blocked_notified = False  # このセッションで保存拒否をすでに通知したかどうか（通知はセッション中 1 回だけ）
 
+# ディレクトリ fsync の省略をこのセッションで既に警告したかどうか。省略は「電源断への
+# 耐性が失われたまま誰も気づけない」状態なので、POSIX では 1 回だけ警告として知らせる
+# （保存のたびに鳴らすとうるさいため、_save_blocked_notified と同じ「1 回だけ」方式にする）。
+_dir_fsync_warned = False  # POSIX でのディレクトリ fsync 省略をすでに警告したか
+
 
 def set_save_blocked_listener(listener: SaveBlockedListener | None) -> None:
     """保存拒否（読み込み失敗による上書き停止）を通知するコールバックを登録する。
@@ -143,13 +148,12 @@ def _preserve_corrupt_file(path: str) -> None:
     except OSError as e:  # 改名に失敗した場合（権限不足・ファイルが既に無い等）
         logging.warning("壊れたファイルの退避に失敗しました (%s → %s): %s", path, backup_path, e)  # 退避失敗も握り潰さずログに残す（§6）
         return  # 退避できなくても読み込み処理自体は続行する（fail-safe）
+    # この改名も _atomic_write_json と同じくディレクトリエントリを書き換えるので、同じように確定させる。
+    # 片方だけ確定させると「このモジュールの改名は確定済み」という約束が場所によって崩れ、
+    # 監査する人が隔離も守られていると誤解する（隔離が巻き戻ってもデータは失われず次回起動で
+    # やり直されるが、不変条件を黙って破らないために揃えておく）。
+    _fsync_directory(os.path.dirname(path) or ".")  # 退避（改名）をディスクへ確定させる
     logging.warning("読み込めないファイルを %s へ退避しました。必要ならこのファイルから手動で復旧できます。", backup_path)  # 退避先の場所をユーザーへ知らせる
-
-
-# ディレクトリ fsync の省略をこのセッションで既に警告したかどうか。省略は「電源断への
-# 耐性が失われたまま誰も気づけない」状態なので、POSIX では 1 回だけ警告として知らせる
-# （保存のたびに鳴らすとうるさいため、_save_blocked_notified と同じ「1 回だけ」方式にする）。
-_dir_fsync_warned = False  # POSIX でのディレクトリ fsync 省略をすでに警告したか
 
 
 def _warn_dir_fsync_unavailable(what: str, directory: str, error: Exception) -> None:
@@ -209,11 +213,20 @@ def _fsync_directory(directory: str) -> None:
     ディレクトリを開いて fsync すると、この改名そのものがディスクへ確定する。
 
     移植性（§10）: ディレクトリを開いて fsync できるのは POSIX（Linux / macOS）だけで、
-    Windows ではディレクトリを os.open できない。ただし Windows の os.replace
-    （MoveFileEx）はメタデータを同期的に更新するため、この処理はそもそも不要である。
-    そこで非 POSIX では**何も試みずに戻る**。os.open を呼んで失敗から環境を察するより、
-    静的に分かっている前提をそのまま条件に書くほうが意図が読み取れるうえ、保存のたびに
-    「必ず失敗する呼び出し」と例外生成を繰り返さずに済む。
+    Windows ではディレクトリを os.open できない。そこで非 POSIX では**何も試みずに戻る**
+    （必ず失敗する os.open を保存のたびに呼んで例外を生成するより、静的に分かっている
+    前提をそのまま条件に書くほうが意図が読み取れる）。
+
+    **Windows に残る限界（既知の未解決事項）**: 上の早期 return は「Windows では不要」
+    なのではなく「**Windows では手段が無い**」という妥協である。CPython の os.replace は
+    MoveFileExW(src, dst, MOVEFILE_REPLACE_EXISTING) を呼ぶだけで、Microsoft が
+    「呼び出しがディスクへ届くまで戻らない」と定める MOVEFILE_WRITE_THROUGH を渡して
+    いない（3.11 と main の Modules/posixmodule.c で確認。どちらも同フラグの出現数は 0）。
+    NTFS のジャーナルが保証するのは原子性（改名が起きたか起きなかったかのどちらか）で
+    あって耐久性ではないため、**Windows では改名直後の電源断で直前の保存が巻き戻る
+    可能性が残る**。Python の標準 API にこれを強制する移植可能な手段は無く、塞ぐには
+    ctypes 等で Win32 を直接呼ぶ必要があるので、現時点では限界として明記するに留める
+    （POSIX 側の穴は塞げているのに Windows も安全だと誤解されるのを防ぐため）。
 
     POSIX で失敗した場合は「できないだけ」とみなし、記録を残して続行する。ここで
     書き込み自体を失敗扱いにすると、中身は正しく置き換わっているのに save_* が
