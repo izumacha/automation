@@ -727,7 +727,11 @@ class DirectoryFsyncTests(unittest.TestCase):
         でも空リストとして素通りし、検査が何も確かめないまま緑になるため。
         close の失敗だけは仕様どおりデバッグログに留めるので False を渡す。
         """
-        reported = [r.getMessage() for r in records if "保存に失敗しました" in r.getMessage()]  # 誤報だけを抽出する
+        # 「保存に失敗しました」で部分一致させると、退避保存の失敗（「復旧用ファイルへの
+        # 退避保存に失敗しました」）まで拾ってしまい、誤報が無いのに誤報ありと判定しうる。
+        # 狙っているのは本体保存の 2 文だけなので前方一致で絞る。
+        prefixes = ("設定ファイルの保存に失敗しました", "タスクファイルの保存に失敗しました")  # 誤報とみなす文の先頭
+        reported = [r.getMessage() for r in records if r.getMessage().startswith(prefixes)]  # 誤報だけを抽出する
         self.assertEqual(reported, [], "保存は成功しているのに失敗として報告されている")  # 1 件でもあれば失敗させる
         if expect_durability_warning and config._SUPPORTS_DIRECTORY_FSYNC:  # 警告が出るはずの環境でのみ
             self.assertTrue(any("電源断" in r.getMessage() for r in records),
@@ -761,30 +765,39 @@ class DirectoryFsyncTests(unittest.TestCase):
         """
         return stat.S_ISDIR(os.fstat(fd).st_mode)  # FD の情報からディレクトリかどうかを判定する
 
-    def _record_synced_directories(self, synced):
-        """fsync 対象がディレクトリなら (デバイス番号, inode) を synced へ記録する差し替え関数を作る。
+    def _intercept_fsync(self, on_call):
+        """os.fsync の呼び出しを観測する差し替え関数を作る（本物へは必ず委譲する）。
 
-        FD からは名前が分からないので識別子で控える。
+        観測の定型（本物の fsync を先に捕まえる・対象がディレクトリか判定する・識別子を
+        取る・最後に本物へ委譲する）が 3 箇所で同じだったのでここへ集約した（§6 DRY。
+        _is_directory_fd を切り出したのと同じ理由）。差し替え方を変えるとき — たとえば
+        os.fsync のプロセス全体の差し替えをやめるとき — に直す場所を 1 つに保つ。
+        on_call には (ディレクトリか, (デバイス番号, inode)) が渡る。FD からは名前が
+        分からないので、指し先は識別子で控える。
         """
-        real_fsync = os.fsync  # 差し替え前の本物の fsync を先に捕まえておく
-
-        def _record(fd):
-            if self._is_directory_fd(fd):  # ディレクトリだった場合のみ
-                info = os.fstat(fd)  # 識別子を得るために情報を取得する
-                synced.append((info.st_dev, info.st_ino))  # 識別子を記録する
-            return real_fsync(fd)  # 記録した後は本物の fsync をそのまま実行する
-
-        return _record  # 差し替え用の関数を返す
-
-    def _record_fsync_targets(self, targets):
-        """os.fsync の呼び出し先が「ディレクトリかどうか」を targets へ記録する差し替え関数を作る。"""
         real_fsync = os.fsync  # 差し替え前の本物の fsync を先に捕まえておく（記録後に実際の同期も行うため）
 
-        def _record(fd):
-            targets.append(self._is_directory_fd(fd))  # そのFDがディレクトリを指すかを記録する
+        def _fsync(fd):
+            info = os.fstat(fd)  # そのFDが指す対象の情報を取得する
+            on_call(stat.S_ISDIR(info.st_mode), (info.st_dev, info.st_ino))  # 観測結果を呼び出し側へ渡す
             return real_fsync(fd)  # 記録した後は本物の fsync をそのまま実行する
 
-        return _record  # 差し替え用の関数を返す
+        return _fsync  # 差し替え用の関数を返す
+
+    def _record_synced_directories(self, synced):
+        """fsync されたディレクトリの識別子を、呼ばれた順に synced へ記録する差し替えを作る。"""
+        def _on_call(is_directory, ids):
+            if is_directory:  # ディレクトリに対する fsync のみ
+                synced.append(ids)  # 識別子を記録する
+
+        return self._intercept_fsync(_on_call)  # 共通の観測係に乗せて返す
+
+    def _record_fsync_targets(self, targets):
+        """os.fsync の呼び出し先が「ディレクトリかどうか」を targets へ記録する差し替えを作る。"""
+        def _on_call(is_directory, _ids):
+            targets.append(is_directory)  # そのFDがディレクトリを指すかを記録する
+
+        return self._intercept_fsync(_on_call)  # 共通の観測係に乗せて返す
 
     @_posix_only
     def test_save_tasks_fsyncs_directory_entry(self):
@@ -806,22 +819,19 @@ class DirectoryFsyncTests(unittest.TestCase):
         # 見逃してしまう（実際に移しても全テストが緑のままになることを確認済み）。
         events = []  # os.replace とディレクトリ fsync の発生順を記録するリスト
         real_replace = os.replace  # 差し替え前の本物の os.replace を捕まえておく
-        real_fsync = os.fsync  # 差し替え前の本物の os.fsync を捕まえておく
-
         def _record_replace(src, dst):
             events.append("replace")  # 改名が起きたことを記録する
             return real_replace(src, dst)  # 実際に改名する
 
-        def _record_fsync(fd):
-            if self._is_directory_fd(fd):  # ディレクトリに対する fsync のみ
+        def _on_fsync(is_directory, _ids):
+            if is_directory:  # ディレクトリに対する fsync のみ
                 events.append("fsync_dir")  # 記録する（ファイル本体の fsync は順序の対象外）
-            return real_fsync(fd)  # 実際に同期する
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tasks_path = os.path.join(tmpdir, "tasks.json")
             with patch("reminder.config._TASKS_PATH", tasks_path), \
                  patch("reminder.config.os.replace", side_effect=_record_replace), \
-                 patch("reminder.config.os.fsync", side_effect=_record_fsync):
+                 patch("reminder.config.os.fsync", side_effect=self._intercept_fsync(_on_fsync)):
                 save_tasks([Task(title="保存", due="2026-06-06T09:00:00")])
         # tmpdir は既に存在するので新規作成階層の fsync は発生せず、この 2 件だけが並ぶ
         self.assertEqual(events, ["replace", "fsync_dir"],
