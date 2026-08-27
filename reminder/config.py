@@ -11,6 +11,7 @@ import enum
 import json
 import logging
 import os
+import stat
 import tempfile
 import uuid
 from collections.abc import Callable
@@ -59,6 +60,7 @@ _save_blocked_notified = False  # このセッションで保存拒否をすで�
 _SUPPORTS_DIRECTORY_FSYNC = os.name == "posix"  # ディレクトリの fsync が可能な環境かどうか
 
 
+@enum.unique  # 値（説明文）が重なった用途は別名に潰れて予算を共有してしまうので、import 時に弾く
 class _DirFsyncPurpose(enum.Enum):
     """ディレクトリ fsync を行う用途。**値は「省略されたときに何が起きうるか」の説明文**。
 
@@ -72,6 +74,12 @@ class _DirFsyncPurpose(enum.Enum):
     誤解させる。(2) 後述の「1 回だけ」の警告予算を用途ごとに持つため。予算を共有すると、
     危険度の低い経路（隔離や、まだ何も書いていない段階のディレクトリ作成）が唯一の枠を
     使い切り、実際にデータが危うい保存経路の警告が二度と出なくなる。
+
+    値を説明文にしている副作用として、**文面が完全に一致する用途を足すと Python が
+    それを別名（alias）として畳んでしまう**。畳まれた 2 つは同一メンバーになるため
+    予算を共有し、上で避けたはずの「危険な側が黙らされる」状態が戻ってくる（しかも
+    ログには先に定義された方の名前が出るので、どの改名が確定できていないのかを
+    取り違える）。@enum.unique を付けて、その状態を import 時のエラーにしている。
     """
 
     CREATE = "作成した保存先ディレクトリが電源断で消え、中のファイルごと失われる可能性があります。"  # 保存先ディレクトリを新規作成した用途
@@ -329,6 +337,12 @@ def _fsync_directory(directory: str, purpose: _DirFsyncPurpose) -> None:
         _warn_dir_fsync_unavailable("ディレクトリを開けないため fsync を省略しました", directory, e, purpose)  # 耐性が失われたことを用途ごとに 1 回だけ警告する（§6）
         return  # 改名自体は完了しているので、確定できなくてもそのまま続行する
     try:
+        # getattr の既定値 0 は「O_DIRECTORY を持たない環境では何も要求しない」を意味するので、
+        # そこでは上の os.open が普通のファイルにも成功してしまい fail-open が復活する
+        # （その環境では本番だけが素通りし、CI の検査は落ちるという最悪の組み合わせになる）。
+        # フラグの有無に依存せず、開いた相手が本当にディレクトリかを確かめる。
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):  # 開いた相手がディレクトリでない場合
+            raise NotADirectoryError(f"ディレクトリではありません: {directory!r}")  # 下の警告経路へ流す
         os.fsync(fd)  # ディレクトリエントリ（名前→中身の対応）をディスクへ確定させる
     except Exception as e:  # ディレクトリの fsync に対応しないファイルシステムなどの場合
         _warn_dir_fsync_unavailable("ディレクトリの fsync に失敗しました", directory, e, purpose)  # 耐性が失われたことを用途ごとに 1 回だけ警告する（§6）
@@ -375,7 +389,15 @@ def _atomic_write_json(path: str, payload: object) -> None:
     # delete=False ではなく mkstemp を使い、書き込み後に os.replace で本番へ差し替える
     fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".tmp-", suffix=".json")  # 同一ディレクトリ上に一時ファイルを作成しFDを得る
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:  # 低レベルFDをUTF-8テキストファイルとして開く（with終了時にcloseされる）
+        # os.fdopen が失敗した場合、fd の所有権はファイルオブジェクトへ移らない。
+        # 下の with に入れないままだと生の fd が誰にも閉じられずに残るため、ここで閉じる
+        # （失敗が繰り返されると fd を使い切る。§8 リソースの解放）。
+        try:
+            handle = os.fdopen(fd, "w", encoding="utf-8")  # 低レベルFDをUTF-8テキストファイルとして開く
+        except Exception:
+            os.close(fd)  # 所有権が移っていないので自分で閉じてから、下の共通後始末へ送る
+            raise  # 一時ファイルの削除は外側の except がまとめて行う
+        with handle as f:  # ファイルオブジェクトとして扱う（with 終了時に close される）
             json.dump(payload, f, ensure_ascii=False, indent=2)  # ペイロードをインデント付きJSONとして一時ファイルへ書き出す
             f.flush()  # PythonのバッファをOSへ確実に渡す
             os.fsync(f.fileno())  # OSバッファをディスクへ同期し、置き換え後に中身が空になる事故を防ぐ

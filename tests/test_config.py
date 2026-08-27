@@ -793,7 +793,6 @@ class DirectoryFsyncTests(unittest.TestCase):
             tasks_path = os.path.join(tmpdir, "tasks.json")
             fsync_targets = []  # os.fsync が「ディレクトリ」に対して呼ばれたかを記録するリスト
             with patch("reminder.config._TASKS_PATH", tasks_path), \
-                 patch("reminder.config._CONFIG_DIR", tmpdir), \
                  patch("reminder.config.os.fsync", side_effect=self._record_fsync_targets(fsync_targets)):
                 save_tasks([Task(title="保存", due="2026-06-06T09:00:00")])
             self.assertTrue(any(fsync_targets), "ディレクトリエントリが fsync されていない（改名が電源断で巻き戻り得る）")
@@ -821,7 +820,6 @@ class DirectoryFsyncTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             tasks_path = os.path.join(tmpdir, "tasks.json")
             with patch("reminder.config._TASKS_PATH", tasks_path), \
-                 patch("reminder.config._CONFIG_DIR", tmpdir), \
                  patch("reminder.config.os.replace", side_effect=_record_replace), \
                  patch("reminder.config.os.fsync", side_effect=_record_fsync):
                 save_tasks([Task(title="保存", due="2026-06-06T09:00:00")])
@@ -840,7 +838,6 @@ class DirectoryFsyncTests(unittest.TestCase):
             config_dir = os.path.join(tmpdir, "reminder")  # まだ存在しない保存先ディレクトリ
             tasks_path = os.path.join(config_dir, "tasks.json")
             with patch("reminder.config._TASKS_PATH", tasks_path), \
-                 patch("reminder.config._CONFIG_DIR", config_dir), \
                  patch("reminder.config.os.fsync", side_effect=self._record_synced_directories(synced_dirs)):
                 save_tasks([Task(title="保存", due="2026-06-06T09:00:00")])
             parent = os.stat(tmpdir)  # 新規作成した config_dir の親（~/.config 相当）
@@ -854,7 +851,6 @@ class DirectoryFsyncTests(unittest.TestCase):
             path = os.path.join(tmpdir, "settings.json")
             fsync_targets = []  # os.fsync が「ディレクトリ」に対して呼ばれたかを記録するリスト
             with patch("reminder.config._SETTINGS_PATH", path), \
-                 patch("reminder.config._CONFIG_DIR", tmpdir), \
                  patch("reminder.config.os.fsync", side_effect=self._record_fsync_targets(fsync_targets)):
                 save_prefs(Prefs(wake="06:30", sleep="22:00"))
             self.assertTrue(any(fsync_targets), "設定保存でディレクトリエントリが fsync されていない")
@@ -871,7 +867,6 @@ class DirectoryFsyncTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             tasks_path = os.path.join(tmpdir, "tasks.json")
             with patch("reminder.config._TASKS_PATH", tasks_path), \
-                 patch("reminder.config._CONFIG_DIR", tmpdir), \
                  patch("reminder.config.os.fsync", side_effect=_fail_for_directory), \
                  self._captured_warnings() as records:
                 save_tasks([Task(title="保存", due="2026-06-06T09:00:00")])
@@ -882,18 +877,10 @@ class DirectoryFsyncTests(unittest.TestCase):
 
     def test_directory_open_failure_does_not_fail_save(self):
         # Windows のようにディレクトリを os.open できない環境でも、保存が成功扱いのままであること
-        real_open = os.open  # 差し替え前の本物の os.open を捕まえておく（一時ファイル作成には必要）
-
-        def _fail_for_directory(path, flags, *args, **kwargs):
-            if os.path.isdir(path):  # 開こうとしている対象がディレクトリの場合は
-                raise PermissionError("Windows ではディレクトリを開けない")  # Windows の挙動を再現して失敗させる
-            return real_open(path, flags, *args, **kwargs)  # ファイルに対しては通常どおり開く
-
         with tempfile.TemporaryDirectory() as tmpdir:
             tasks_path = os.path.join(tmpdir, "tasks.json")
             with patch("reminder.config._TASKS_PATH", tasks_path), \
-                 patch("reminder.config._CONFIG_DIR", tmpdir), \
-                 patch("reminder.config.os.open", side_effect=_fail_for_directory), \
+                 patch("reminder.config.os.open", side_effect=self._fail_open_for_directories(OSError("ディレクトリを開けない"))), \
                  self._captured_warnings() as records:
                 save_tasks([Task(title="保存", due="2026-06-06T09:00:00")])
             with patch("reminder.config._TASKS_PATH", tasks_path):
@@ -959,7 +946,6 @@ class DirectoryFsyncTests(unittest.TestCase):
             config_dir = os.path.join(tmpdir, "config", "reminder")  # 2 段まとめて新規作成される
             tasks_path = os.path.join(config_dir, "tasks.json")
             with patch("reminder.config._TASKS_PATH", tasks_path), \
-                 patch("reminder.config._CONFIG_DIR", config_dir), \
                  patch("reminder.config.os.fsync", side_effect=self._record_synced_directories(synced_dirs)):
                 save_tasks([Task(title="保存", due="2026-06-06T09:00:00")])
             # 新しく作られた各階層について、その名前を保持する親が確定されているか確かめる
@@ -998,16 +984,8 @@ class DirectoryFsyncTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = os.path.join(tmpdir, "config", "reminder")  # まだ存在しない保存先
             tasks_path = os.path.join(config_dir, "tasks.json")
-            real_open = os.open  # 差し替え前の本物の os.open を捕まえておく
-
-            def _fail_for_directory(path, flags, *args, **kwargs):
-                if os.path.isdir(path):  # ディレクトリを開こうとした場合のみ
-                    raise OSError("ディレクトリを開けない")  # fsync できない環境を再現する
-                return real_open(path, flags, *args, **kwargs)  # ファイルは通常どおり開く
-
             with patch("reminder.config._TASKS_PATH", tasks_path), \
-                 patch("reminder.config._CONFIG_DIR", config_dir), \
-                 patch("reminder.config.os.open", side_effect=_fail_for_directory), \
+                 patch("reminder.config.os.open", side_effect=self._fail_open_for_directories(OSError("ディレクトリを開けない"))), \
                  self._captured_warnings() as records:
                 save_tasks([Task(title="保存", due="2026-06-06T09:00:00")])
             messages = [r.getMessage() for r in records]  # 収集した警告文の一覧
@@ -1073,6 +1051,58 @@ class DirectoryFsyncTests(unittest.TestCase):
                 config._fsync_directory(not_a_directory, config._DirFsyncPurpose.SAVE)  # 例外は投げずに警告するはず
         self.assertIn("電源断", captured.output[0], "耐久性を得られなかったことが伝わっていない")
 
+    def test_purposes_do_not_share_a_message(self):
+        # 用途の値（説明文）が重なると Python が別名（alias）として畳み、2 つの用途が
+        # 同一メンバーになって警告予算を共有してしまう（危険な側が黙らされる状態が戻る）。
+        # @enum.unique が付いていれば import 時に弾かれるので、ここでは畳まれていないことを見る。
+        purposes = list(config._DirFsyncPurpose)  # 定義されている用途を列挙する（別名は列挙に現れない）
+        messages = [p.value for p in purposes]  # それぞれの説明文を取り出す
+        self.assertEqual(len(messages), len(set(messages)), "説明文が重なった用途は別名に畳まれてしまう")
+        self.assertEqual(len(purposes), 3, "用途を増減したらこの検査の前提も見直すこと")
+
+    @_posix_only
+    def test_non_directory_is_caught_even_without_o_directory(self):
+        # O_DIRECTORY を持たない環境（getattr の既定値 0 に落ちる）でも、ディレクトリ以外を
+        # 黙って fsync しないこと。フラグ頼みだと、その環境では本番だけが素通りし CI の検査は
+        # 落ちるという最悪の組み合わせになるため、開いた相手の種別も併せて確かめている。
+        with tempfile.TemporaryDirectory() as tmpdir:
+            not_a_directory = os.path.join(tmpdir, "not-a-dir")  # ディレクトリではない相手を用意する
+            with open(not_a_directory, "w", encoding="utf-8") as f:
+                f.write("")  # 中身は空でよい
+            with patch.object(os, "O_DIRECTORY", 0), \
+                 self.assertLogs("root", level="WARNING") as captured:
+                config._fsync_directory(not_a_directory, config._DirFsyncPurpose.SAVE)  # 例外は投げずに警告するはず
+        self.assertIn("電源断", captured.output[0], "耐久性を得られなかったことが伝わっていない")
+
+    def test_fdopen_failure_closes_the_raw_descriptor(self):
+        # os.fdopen が失敗した場合、fd の所有権はファイルオブジェクトへ移らないので
+        # 自分で閉じないと生の fd が残る（失敗が繰り返されると fd を使い切る）。
+        opened = []  # mkstemp が返したFDを記録するリスト
+        closed = []  # os.close に渡されたFDを記録するリスト
+        real_mkstemp = tempfile.mkstemp  # 差し替え前の本物の mkstemp を捕まえておく
+        real_close = os.close  # 差し替え前の本物の os.close を捕まえておく
+
+        def _record_mkstemp(*args, **kwargs):
+            fd, path = real_mkstemp(*args, **kwargs)  # 実際に一時ファイルを作る
+            opened.append(fd)  # 得られたFDを記録する
+            return fd, path  # 呼び出し元へそのまま返す
+
+        def _record_close(fd):
+            closed.append(fd)  # 閉じられたFDを記録する
+            return real_close(fd)  # 実際に閉じる
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tasks_path = os.path.join(tmpdir, "tasks.json")
+            with patch("reminder.config.tempfile.mkstemp", side_effect=_record_mkstemp), \
+                 patch("reminder.config.os.close", side_effect=_record_close), \
+                 patch("reminder.config.os.fdopen", side_effect=RuntimeError("fdopen 失敗")), \
+                 self.assertRaises(RuntimeError):
+                config._atomic_write_json(tasks_path, [])  # 書き込みは失敗し、例外は呼び出し元へ伝わる
+            leftovers = [n for n in os.listdir(tmpdir) if n.startswith(".tmp-")]
+        self.assertEqual(len(opened), 1, "一時ファイルが 1 回だけ作られているはず")
+        self.assertIn(opened[0], closed, "fdopen 失敗時に生のファイルディスクリプタが閉じられていない")
+        self.assertEqual(leftovers, [], "失敗時に一時ファイルが残っている")
+
     def test_non_oserror_does_not_escape_either(self):
         # 「この関数は例外を投げない」という約束を、例外の種類の見積もりに頼らず守ること。
         # 実際に出るのはほぼ OSError だが、たとえばパスに NUL が混じった場合の ValueError の
@@ -1100,7 +1130,6 @@ class DirectoryFsyncTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             tasks_path = os.path.join(tmpdir, "tasks.json")
             with patch("reminder.config._TASKS_PATH", tasks_path), \
-                 patch("reminder.config._CONFIG_DIR", tmpdir), \
                  patch("reminder.config.os.close", side_effect=_fail_for_directory_fd), \
                  self._captured_warnings() as records:
                 save_tasks([Task(title="保存", due="2026-06-06T09:00:00")])
@@ -1139,7 +1168,7 @@ class DirectoryFsyncTests(unittest.TestCase):
         self.assertIn("SAVE", skips[0], "どの用途が確定できていないのかが記録されていない")
         with patch("reminder.config._SUPPORTS_DIRECTORY_FSYNC", False), \
              self.assertLogs("root", level="DEBUG") as other:
-            config._fsync_directory("/tmp", config._DirFsyncPurpose.CREATE)  # 別用途は別枠で記録されるはず
+            config._fsync_directory(tmpdir, config._DirFsyncPurpose.CREATE)  # 別用途は別枠で記録されるはず
         self.assertTrue(any("CREATE" in line for line in other.output),
                         "別の用途の記録が、先に使われた用途に食われている")
 
