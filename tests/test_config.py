@@ -666,6 +666,10 @@ class DirectoryFsyncTests(unittest.TestCase):
     結び付けた改名は確定しない。ディレクトリ自身を fsync して初めて改名が確定する。
     """
 
+    def setUp(self):
+        # 「省略の警告はセッション中 1 回だけ」という状態がテスト間に持ち越されないよう毎回リセットする
+        config._dir_fsync_warned = False
+
     def _record_fsync_targets(self, targets):
         """os.fsync の呼び出し先が「ディレクトリかどうか」を targets へ記録する差し替え関数を作る。"""
         real_fsync = os.fsync  # 差し替え前の本物の fsync を先に捕まえておく（記録後に実際の同期も行うため）
@@ -739,18 +743,79 @@ class DirectoryFsyncTests(unittest.TestCase):
 
     def test_directory_fsync_closes_descriptor(self):
         # fsync が失敗しても、開いたディレクトリのFDが必ず閉じられること（FDリークを防ぐ）
-        closed = []  # os.close に渡されたファイルディスクリプタを記録するリスト
-        real_close = os.close  # 差し替え前の本物の os.close を捕まえておく
+        opened = []  # _fsync_directory が開いたディレクトリのFDを記録するリスト
+        real_open = os.open  # 差し替え前の本物の os.open を捕まえておく
 
-        def _record_close(fd):
-            closed.append(fd)  # 閉じられたFDを記録する
-            return real_close(fd)  # 実際に閉じる
+        def _record_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)  # 実際に開く
+            if os.path.isdir(path):  # ディレクトリを開いた場合のみ
+                opened.append(fd)  # そのFDを記録する（他所の os.open 呼び出しは数えない）
+            return fd  # 開いたFDを呼び出し元へ返す
 
         with tempfile.TemporaryDirectory() as tmpdir, \
-             patch("reminder.config.os.close", side_effect=_record_close), \
+             patch("reminder.config.os.open", side_effect=_record_open), \
              patch("reminder.config.os.fsync", side_effect=OSError("fsync 非対応")):
             config._fsync_directory(tmpdir)  # fsync が失敗する状況でディレクトリ同期を呼ぶ
-        self.assertEqual(len(closed), 1, "ディレクトリのファイルディスクリプタが閉じられていない")
+        self.assertEqual(len(opened), 1, "ディレクトリが 1 回だけ開かれているはず")
+        # 閉じられたことを os.close の呼び出し回数ではなくFD自身の状態で確かめる。
+        # 回数を数えると、無関係な os.close（os は全プロセス共有のため）まで拾ってしまう。
+        with self.assertRaises(OSError, msg="ディレクトリのファイルディスクリプタが閉じられていない"):
+            os.fstat(opened[0])  # 閉じ済みのFDを stat すると EBADF で失敗する
+
+    def test_close_failure_does_not_escape(self):
+        # 後始末の os.close が失敗しても、呼び出し元へ例外が漏れないこと。
+        # 漏らすと _atomic_write_json の直後で送出され、書き込みも改名も成功しているのに
+        # save_* が「保存に失敗しました」と誤報してしまう（NFS / FUSE の遅延 I/O エラーで起こりうる）。
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch("reminder.config.os.close", side_effect=OSError("NFS の遅延 I/O エラー")):
+            config._fsync_directory(tmpdir)  # 例外が送出されなければテスト成功（送出されればここで落ちる）
+
+    def test_save_does_not_report_failure_when_close_fails(self):
+        # close 失敗が save_tasks まで波及しないこと。
+        # 内容が読み戻せるかだけを見ても不十分で、例外が漏れても save_tasks の
+        # except Exception が飲み込むため中身は保存済みのままになる。ユーザーに見える
+        # 実害は「成功しているのに失敗と言われる」ことなので、警告ログの有無まで確かめる。
+        real_close = os.close  # 差し替え前の本物の os.close を捕まえておく
+
+        def _fail_for_directory_fd(fd):
+            mode = os.fstat(fd).st_mode  # 閉じる前にそのFDの種別を調べる
+            real_close(fd)  # FDリークを避けるため、失敗を装う場合でも実際には閉じる
+            if stat.S_ISDIR(mode):  # 対象がディレクトリだった場合は
+                raise OSError("NFS の遅延 I/O エラー")  # close 時の遅延エラーを再現する
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tasks_path = os.path.join(tmpdir, "tasks.json")
+            with patch("reminder.config._TASKS_PATH", tasks_path), \
+                 patch("reminder.config._CONFIG_DIR", tmpdir), \
+                 patch("reminder.config.os.close", side_effect=_fail_for_directory_fd), \
+                 self.assertLogs("root", level="DEBUG") as captured:
+                save_tasks([Task(title="保存", due="2026-06-06T09:00:00")])
+            with patch("reminder.config._TASKS_PATH", tasks_path):
+                loaded = load_tasks()  # 差し替えを解除した状態で読み直す
+        self.assertEqual([t.title for t in loaded], ["保存"])
+        # 保存は実際に成功しているので、「保存に失敗しました」と報告してはならない
+        failures = [line for line in captured.output if "保存に失敗しました" in line]
+        self.assertEqual(failures, [], "保存は成功しているのに失敗として報告されている")
+
+    def test_posix_skip_warns_once_then_falls_back_to_debug(self):
+        # POSIX では省略＝電源断耐性が失われた状態なので、デバッグに埋もれさせず警告で知らせること。
+        # ただし保存のたびに鳴らさないよう、警告はセッション中 1 回だけであること。
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch("reminder.config.os.name", "posix"), \
+             patch("reminder.config.os.open", side_effect=PermissionError("マウントの制限")):
+            with self.assertLogs("root", level="WARNING") as captured:
+                config._fsync_directory(tmpdir)  # 1 回目は警告が出るはず
+            self.assertIn("電源断", captured.output[0])  # 何が失われるのかが警告文に含まれること
+            with self.assertNoLogs("root", level="WARNING"):
+                config._fsync_directory(tmpdir)  # 2 回目以降は警告を繰り返さない
+
+    def test_windows_skip_stays_at_debug(self):
+        # Windows は os.replace がメタデータを同期更新するため省略は想定内で、警告にしないこと
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch("reminder.config.os.name", "nt"), \
+             patch("reminder.config.os.open", side_effect=PermissionError("Windows ではディレクトリを開けない")), \
+             self.assertNoLogs("root", level="WARNING"):
+            config._fsync_directory(tmpdir)  # 警告が出なければテスト成功
 
 
 if __name__ == "__main__":

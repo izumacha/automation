@@ -146,6 +146,35 @@ def _preserve_corrupt_file(path: str) -> None:
     logging.warning("読み込めないファイルを %s へ退避しました。必要ならこのファイルから手動で復旧できます。", backup_path)  # 退避先の場所をユーザーへ知らせる
 
 
+# ディレクトリ fsync の省略をこのセッションで既に警告したかどうか。省略は「電源断への
+# 耐性が失われたまま誰も気づけない」状態なので、POSIX では 1 回だけ警告として知らせる
+# （保存のたびに鳴らすとうるさいため、_save_blocked_notified と同じ「1 回だけ」方式にする）。
+_dir_fsync_warned = False  # POSIX でのディレクトリ fsync 省略をすでに警告したか
+
+
+def _report_dir_fsync_skipped(what: str, directory: str, error: OSError) -> None:
+    """ディレクトリ fsync を省略した事実を、実行環境に応じた深刻度で記録する。
+
+    Windows ではディレクトリを fsync できないが、os.replace（MoveFileEx）が
+    メタデータを同期的に更新するため省略は**想定内**であり、デバッグログで十分。
+
+    一方 POSIX で省略が起きるのは想定外（SELinux/AppArmor の拒否、FUSE 系ホーム、
+    制限の強いコンテナのマウントなど）で、そのとき失われるのは
+    まさに _fsync_directory が足そうとした電源断耐性そのものである。デバッグログに
+    落とすと cli.py が INFO で起動する以上ユーザーには一生見えないため、警告として
+    残す（§6 エラーを握り潰さない）。ただし保存のたびに鳴らさないよう 1 回だけにする。
+    """
+    global _dir_fsync_warned  # 「警告済み」フラグを書き換えるため global 宣言する
+    if os.name == "posix" and not _dir_fsync_warned:  # POSIX で、まだ警告していない場合のみ
+        _dir_fsync_warned = True  # このセッションでは警告済みであることを記録する（通知は 1 回だけ）
+        logging.warning(
+            "%s (%s): %s — 保存内容は書けていますが、電源断で直前の保存が失われる可能性があります。",
+            what, directory, error,
+        )  # 耐性が失われている事実と、データ自体は無事であることの両方を伝える
+        return  # 警告を出したのでデバッグログは重ねない
+    logging.debug("%s (%s): %s", what, directory, error)  # Windows（想定内）と 2 回目以降はデバッグログに留める
+
+
 def _fsync_directory(directory: str) -> None:
     """ディレクトリ自身を fsync し、その中で行った改名（os.replace）を確定させる。
 
@@ -158,21 +187,33 @@ def _fsync_directory(directory: str) -> None:
     移植性（§10）: ディレクトリを開いて fsync できるのは POSIX（Linux / macOS）だけで、
     Windows ではディレクトリを os.open できず PermissionError 等になる。ただし Windows の
     os.replace（MoveFileEx）はメタデータを同期的に更新するため、この処理は不要である。
-    そのため失敗は「その環境では不要か、できないだけ」とみなし、デバッグログを残して
-    続行する（呼び出し元へ例外を伝えない）。ここで書き込み自体を失敗扱いにすると、
-    中身は正しく置き換わっているのに save_* が「保存に失敗」と誤報してしまう。
+    そのため失敗は「その環境では不要か、できないだけ」とみなし、記録を残して続行する。
+    ここで書き込み自体を失敗扱いにすると、中身は正しく置き換わっているのに save_* が
+    「保存に失敗」と誤報してしまう。記録の深刻度は環境によって変える
+    （_report_dir_fsync_skipped の docstring を参照）。
+
+    **この関数は例外を投げない。** 後始末の os.close も含めて捕捉する。呼び出し元
+    （_atomic_write_json）はこの前提のうえで、改名成功後に無防備に呼んでいる。close は
+    NFS / FUSE 上で遅延した I/O エラーを報告することがあり、これを外へ漏らすと
+    「書き込みも改名も成功したのに保存失敗と誤報する」という、まさにこの関数が
+    避けようとしている誤りが起きる。
     """
     try:
         fd = os.open(directory, os.O_RDONLY)  # ディレクトリ自身を読み取り専用で開いてファイルディスクリプタを得る
     except OSError as e:  # Windows など、ディレクトリを開けない環境の場合
-        logging.debug("ディレクトリを開けないため fsync を省略しました (%s): %s", directory, e)  # 省略した理由をデバッグログに残す（§6: エラーを握り潰さない）
+        _report_dir_fsync_skipped("ディレクトリを開けないため fsync を省略しました", directory, e)  # 省略した理由を環境に応じた深刻度で記録する（§6）
         return  # 改名自体は完了しているので、確定できなくてもそのまま続行する
     try:
         os.fsync(fd)  # ディレクトリエントリ（名前→中身の対応）をディスクへ確定させる
     except OSError as e:  # ディレクトリの fsync に対応しないファイルシステムなどの場合
-        logging.debug("ディレクトリの fsync に失敗しました (%s): %s", directory, e)  # 失敗理由をデバッグログに残す（§6）
+        _report_dir_fsync_skipped("ディレクトリの fsync に失敗しました", directory, e)  # 失敗理由を環境に応じた深刻度で記録する（§6）
     finally:
-        os.close(fd)  # 例外の有無にかかわらずファイルディスクリプタを必ず閉じる（§8 リソースの解放）
+        try:
+            os.close(fd)  # 例外の有無にかかわらずファイルディスクリプタを必ず閉じる（§8 リソースの解放）
+        except OSError as e:  # close 自体が遅延 I/O エラーを報告した場合（NFS / FUSE で起こりうる）
+            # ここで捕まえないと finally の例外がそのまま呼び出し元へ抜け、保存は成功して
+            # いるのに save_* が「保存に失敗しました」と誤報する（docstring の「例外を投げない」も破れる）。
+            logging.debug("ディレクトリのファイルディスクリプタを閉じられませんでした (%s): %s", directory, e)  # 後始末の失敗は致命的ではないのでデバッグログに留める（§6）
 
 
 def _atomic_write_json(path: str, payload: object) -> None:
