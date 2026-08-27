@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import datetime
+import enum
 import json
 import logging
 import os
@@ -57,24 +58,30 @@ _save_blocked_notified = False  # このセッションで保存拒否をすで�
 # （reminder.config.os は os モジュールそのものなので、patch すると全モジュールに効いてしまう）。
 _SUPPORTS_DIRECTORY_FSYNC = os.name == "posix"  # ディレクトリの fsync が可能な環境かどうか
 
+class _DirFsyncPurpose(enum.Enum):
+    """ディレクトリ fsync を行う用途。**値は「省略されたときに何が起きうるか」の説明文**。
+
+    説明文を別の対応表に持たず enum の値そのものにしているのは、用途を足したときに
+    説明文だけ書き忘れる余地を無くすため（表を引く形だと記載漏れが実行時まで分からず、
+    しかも引き損ねた例外が _fsync_directory の「例外を投げない」契約を破って
+    「保存に失敗しました」の誤報になる）。値を持つ enum なら対応は構造上ずれない。
+
+    用途を分ける理由は 2 つある。(1) 省略されたとき何が起きるかが用途ごとに違い、
+    たとえば隔離の側で「直前の保存が失われる」と書くと保存していないのに保存が危ういと
+    誤解させる。(2) 後述の「1 回だけ」の警告予算を用途ごとに持つため。予算を共有すると、
+    危険度の低い経路（隔離や、まだ何も書いていない段階のディレクトリ作成）が唯一の枠を
+    使い切り、実際にデータが危うい保存経路の警告が二度と出なくなる。
+    """
+
+    CREATE = "作成した保存先ディレクトリが電源断で消え、中のファイルごと失われる可能性があります。"  # 保存先ディレクトリを新規作成した用途
+    SAVE = "保存内容は書けていますが、電源断で直前の保存が失われる可能性があります。"  # 原子的書き込みの改名を確定させる用途
+    QUARANTINE = "退避（.corrupt への改名）が電源断で巻き戻る可能性があります。データ自体は失われません。"  # 壊れたファイルの隔離を確定させる用途
+
+
 # ディレクトリ fsync の省略は「電源断への耐性が失われたまま誰も気づけない」状態なので、
 # POSIX では 1 回だけ警告として知らせる（保存のたびに鳴らすとうるさいため、
-# _save_blocked_notified と同じ「1 回だけ」方式にする）。
-# ただし**用途ごとに分ける**。予算を 1 つにすると、起動時の隔離（データは失われない）が
-# 唯一の警告枠を使い切り、以降は保存側（実際にデータが危ういのはこちら）の警告が
-# 二度と出なくなる — 危険度の低い経路が危険な経路を黙らせてしまう。
-_DIR_FSYNC_SAVE = "save"  # 原子的書き込みの改名を確定させる用途
-_DIR_FSYNC_QUARANTINE = "quarantine"  # 壊れたファイルの隔離（.corrupt への改名）を確定させる用途
-# 省略されたときに何が起きうるかも用途によって違うため、警告文の結びを用途ごとに持つ。
-# 隔離の側で「直前の保存が失われる」と書くと、保存していないのに保存が危ういと誤解させる。
-_DIR_FSYNC_CONSEQUENCE = {
-    _DIR_FSYNC_SAVE: "保存内容は書けていますが、電源断で直前の保存が失われる可能性があります。",
-    _DIR_FSYNC_QUARANTINE: "退避（.corrupt への改名）が電源断で巻き戻る可能性があります。データ自体は失われません。",
-}
-# 表に載っていない用途が渡されたときの結び。表の記載漏れで警告そのものを失わせない
-# ための保険で、通常は使われない（_warn_dir_fsync_unavailable のコメント参照）。
-_DIR_FSYNC_UNKNOWN_CONSEQUENCE = "電源断でこの改名が巻き戻る可能性があります。"
-_dir_fsync_warned: set[str] = set()  # すでに警告した用途（_DIR_FSYNC_* のいずれか）の集合
+# _save_blocked_notified と同じ「1 回だけ」方式にする）。予算は上記のとおり用途ごと。
+_dir_fsync_warned: set[_DirFsyncPurpose] = set()  # すでに警告した用途の集合
 
 
 def set_save_blocked_listener(listener: SaveBlockedListener | None) -> None:
@@ -172,11 +179,13 @@ def _preserve_corrupt_file(path: str) -> None:
     # 片方だけ確定させると「このモジュールの改名は確定済み」という約束が場所によって崩れ、
     # 監査する人が隔離も守られていると誤解する（隔離が巻き戻ってもデータは失われず次回起動で
     # やり直されるが、不変条件を黙って破らないために揃えておく）。
-    _fsync_directory(os.path.dirname(path) or ".", _DIR_FSYNC_QUARANTINE)  # 退避（改名）をディスクへ確定させる
+    _fsync_directory(os.path.dirname(path) or ".", _DirFsyncPurpose.QUARANTINE)  # 退避（改名）をディスクへ確定させる
     logging.warning("読み込めないファイルを %s へ退避しました。必要ならこのファイルから手動で復旧できます。", backup_path)  # 退避先の場所をユーザーへ知らせる
 
 
-def _warn_dir_fsync_unavailable(what: str, directory: str, error: Exception, purpose: str) -> None:
+def _warn_dir_fsync_unavailable(
+    what: str, directory: str, error: Exception, purpose: _DirFsyncPurpose
+) -> None:
     """ディレクトリ fsync を省略した事実を、用途ごとに 1 回だけ警告として記録する。
 
     呼ばれるのは POSIX だけ（_fsync_directory が非 POSIX を早期 return するため）。
@@ -186,21 +195,16 @@ def _warn_dir_fsync_unavailable(what: str, directory: str, error: Exception, pur
     ユーザーには一生見えないため、警告として残す（§6 エラーを握り潰さない）。
     ただし保存のたびに鳴らさないよう、警告は用途ごとに 1 回だけにして以降はデバッグに落とす。
 
-    purpose には _DIR_FSYNC_SAVE / _DIR_FSYNC_QUARANTINE を渡す。これが警告文の結び
-    （何が起きうるか）と「1 回だけ」の予算の両方を決める（理由は定数側のコメント参照）。
+    purpose は _DirFsyncPurpose のいずれか。これが警告文の結び（何が起きうるか）と
+    「1 回だけ」の予算の両方を決める（理由は _DirFsyncPurpose の docstring 参照）。
     """
     if purpose in _dir_fsync_warned:  # この用途ではすでに警告済みの場合は
         logging.debug("%s (%s): %s", what, directory, error)  # 繰り返しを避けてデバッグログに留める
         return  # 警告は重ねない
     _dir_fsync_warned.add(purpose)  # この用途は警告済みとして記録する（集合なので global 宣言は不要）
-    # 結びは .get で引く。未知の purpose（新しい呼び出し先の追加や打ち間違い）で KeyError を
-    # 投げると、それが _atomic_write_json を抜けて save_* の except Exception に捕まり、
-    # 改名まで成功しているのに「保存に失敗しました」と誤報する。捕捉を Exception へ広げてまで
-    # 守っている「例外を投げない」契約を、表の記載漏れで破らせないための既定値。
-    consequence = _DIR_FSYNC_CONSEQUENCE.get(purpose, _DIR_FSYNC_UNKNOWN_CONSEQUENCE)  # 用途に応じた結びを取り出す（未知なら汎用文）
     logging.warning(
-        "%s (%s): %s — %s", what, directory, error, consequence,
-    )  # 耐性が失われている事実と、その用途で何が起きうるかを併せて伝える
+        "%s (%s): %s — %s", what, directory, error, purpose.value,
+    )  # 耐性が失われている事実と、その用途で何が起きうるかを併せて伝える（値が説明文そのもの）
 
 
 def _make_directory_durable(directory: str) -> None:
@@ -226,10 +230,12 @@ def _make_directory_durable(directory: str) -> None:
         probe = parent  # 1 つ上の階層へ移って確認を続ける
     os.makedirs(directory, exist_ok=True)  # 保存先ディレクトリが存在しない場合は作成する
     for created in reversed(missing):  # 浅い階層から順に（親が確定してから子を確定させる）
-        _fsync_directory(os.path.dirname(created) or ".")  # 新しく作った階層の名前を、その親を fsync して確定させる
+        _fsync_directory(os.path.dirname(created) or ".", _DirFsyncPurpose.CREATE)  # 新しく作った階層の名前を、その親を fsync して確定させる
 
 
-def _fsync_directory(directory: str, purpose: str = _DIR_FSYNC_SAVE) -> None:
+def _fsync_directory(
+    directory: str, purpose: _DirFsyncPurpose = _DirFsyncPurpose.SAVE
+) -> None:
     """ディレクトリ自身を fsync し、その中で行った改名（os.replace）を確定させる。
 
     ファイル本体を fsync しても、それは「ファイルの中身」がディスクへ届いた保証にすぎず、
