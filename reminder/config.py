@@ -152,7 +152,7 @@ def _preserve_corrupt_file(path: str) -> None:
 _dir_fsync_warned = False  # POSIX でのディレクトリ fsync 省略をすでに警告したか
 
 
-def _warn_dir_fsync_unavailable(what: str, directory: str, error: OSError) -> None:
+def _warn_dir_fsync_unavailable(what: str, directory: str, error: Exception) -> None:
     """POSIX でディレクトリ fsync を省略した事実を、セッション中 1 回だけ警告として記録する。
 
     呼ばれるのは POSIX だけ（_fsync_directory が非 POSIX を早期 return するため）。
@@ -224,22 +224,29 @@ def _fsync_directory(directory: str) -> None:
     NFS / FUSE 上で遅延した I/O エラーを報告することがあり、これを外へ漏らすと
     「書き込みも改名も成功したのに保存失敗と誤報する」という、まさにこの関数が
     避けようとしている誤りが起きる。
+
+    捕捉を OSError ではなく Exception にしているのは、この「投げない」という約束を
+    例外の種類の見積もりに頼らず守るため。実際に出るのはほぼ OSError だが、たとえば
+    パスに NUL が混じった場合の ValueError のように別種が出る余地があり、1 つでも
+    漏れれば呼び出し元は誤報を出す。ここで起きる失敗はどれも「耐性を足せなかった」
+    だけで保存の成否とは無関係なので、種類を問わず記録して飲み込むのが正しい
+    （§6 の「握り潰さない」に対しては、飲み込む代わりに必ず記録することで応じている）。
     """
     if os.name != "posix":  # Windows など、ディレクトリを fsync できず、かつその必要も無い環境の場合
         return  # os.replace（MoveFileEx）がメタデータを同期更新するので何もしない
     try:
         fd = os.open(directory, os.O_RDONLY)  # ディレクトリ自身を読み取り専用で開いてファイルディスクリプタを得る
-    except OSError as e:  # POSIX なのに開けない場合（マウントや LSM の制限など、想定外）
+    except Exception as e:  # POSIX なのに開けない場合（マウントや LSM の制限など、想定外）
         _warn_dir_fsync_unavailable("ディレクトリを開けないため fsync を省略しました", directory, e)  # 耐性が失われたことを 1 回だけ警告する（§6）
         return  # 改名自体は完了しているので、確定できなくてもそのまま続行する
     try:
         os.fsync(fd)  # ディレクトリエントリ（名前→中身の対応）をディスクへ確定させる
-    except OSError as e:  # ディレクトリの fsync に対応しないファイルシステムなどの場合
+    except Exception as e:  # ディレクトリの fsync に対応しないファイルシステムなどの場合
         _warn_dir_fsync_unavailable("ディレクトリの fsync に失敗しました", directory, e)  # 耐性が失われたことを 1 回だけ警告する（§6）
     finally:
         try:
             os.close(fd)  # 例外の有無にかかわらずファイルディスクリプタを必ず閉じる（§8 リソースの解放）
-        except OSError as e:  # close 自体が遅延 I/O エラーを報告した場合（NFS / FUSE で起こりうる）
+        except Exception as e:  # close 自体が遅延 I/O エラーを報告した場合（NFS / FUSE で起こりうる）
             # ここで捕まえないと finally の例外がそのまま呼び出し元へ抜け、保存は成功して
             # いるのに save_* が「保存に失敗しました」と誤報する（docstring の「例外を投げない」も破れる）。
             logging.debug("ディレクトリのファイルディスクリプタを閉じられませんでした (%s): %s", directory, e)  # 後始末の失敗は致命的ではないのでデバッグログに留める（§6）

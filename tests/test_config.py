@@ -863,11 +863,15 @@ class DirectoryFsyncTests(unittest.TestCase):
              patch("reminder.config.os.open", side_effect=_record_open), \
              patch("reminder.config.os.fsync", side_effect=OSError("fsync 非対応")):
             config._fsync_directory(tmpdir)  # fsync が失敗する状況でディレクトリ同期を呼ぶ
-        self.assertEqual(len(opened), 1, "ディレクトリが 1 回だけ開かれているはず")
-        # 閉じられたことを os.close の呼び出し回数ではなくFD自身の状態で確かめる。
-        # 回数を数えると、無関係な os.close（os は全プロセス共有のため）まで拾ってしまう。
-        with self.assertRaises(OSError, msg="ディレクトリのファイルディスクリプタが閉じられていない"):
-            os.fstat(opened[0])  # 閉じ済みのFDを stat すると EBADF で失敗する
+            self.assertEqual(len(opened), 1, "ディレクトリが 1 回だけ開かれているはず")
+            # 閉じられたことを os.close の呼び出し回数ではなくFD自身の状態で確かめる。
+            # 回数を数えると、無関係な os.close（os は全プロセス共有のため）まで拾ってしまう。
+            # 判定は _fsync_directory の直後、まだ何もFD番号を確保していないこの位置で行う。
+            # ブロックを抜けてからだと TemporaryDirectory の後始末（os.scandir）が最小の
+            # 空き番号＝いま解放されたばかりの番号を掴み、閉じているのに fstat が成功して
+            # 「閉じられていない」と誤って落ちうるため。
+            with self.assertRaises(OSError, msg="ディレクトリのファイルディスクリプタが閉じられていない"):
+                os.fstat(opened[0])  # 閉じ済みのFDを stat すると EBADF で失敗する
 
     @_posix_only
     def test_close_failure_does_not_escape(self):
@@ -882,6 +886,14 @@ class DirectoryFsyncTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir, \
              patch("reminder.config.os.close", side_effect=_close_then_fail):
+            config._fsync_directory(tmpdir)  # 例外が送出されなければテスト成功（送出されればここで落ちる）
+
+    def test_non_oserror_does_not_escape_either(self):
+        # 「この関数は例外を投げない」という約束を、例外の種類の見積もりに頼らず守ること。
+        # 実際に出るのはほぼ OSError だが、たとえばパスに NUL が混じった場合の ValueError の
+        # ように別種が出る余地があり、1 つでも漏れれば呼び出し元が保存失敗と誤報する。
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch("reminder.config.os.open", side_effect=ValueError("embedded null byte")):
             config._fsync_directory(tmpdir)  # 例外が送出されなければテスト成功（送出されればここで落ちる）
 
     @_posix_only
