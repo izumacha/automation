@@ -693,7 +693,7 @@ class DirectoryFsyncTests(unittest.TestCase):
         # 「この環境では fsync できない」ことの記録も同じくセッション中 1 回きりなので、
         # 同様に元へ戻したうえで未記録から始める（テスト間の持ち越しを防ぐ）。
         self.addCleanup(setattr, config, "_dir_fsync_platform_noted", config._dir_fsync_platform_noted)
-        config._dir_fsync_platform_noted = False
+        config._dir_fsync_platform_noted = set()
 
     @contextlib.contextmanager
     def _captured_warnings(self):
@@ -1133,8 +1133,15 @@ class DirectoryFsyncTests(unittest.TestCase):
              self.assertLogs("root", level="DEBUG") as captured:
             config._fsync_directory(tmpdir, config._DirFsyncPurpose.SAVE)  # 省略される経路を通す
             config._fsync_directory(tmpdir, config._DirFsyncPurpose.SAVE)  # 2 回目は繰り返さないはず
-        skips = [line for line in captured.output if "改名の確定を省略します" in line]
+        skips = [line for line in captured.output if "確定を省略します" in line]
         self.assertEqual(len(skips), 1, "省略の記録が無い、または保存のたびに繰り返している")
+        # 用途を落とすと、保存・作成・隔離のどれが確定できていないのか読み手に分からない
+        self.assertIn("SAVE", skips[0], "どの用途が確定できていないのかが記録されていない")
+        with patch("reminder.config._SUPPORTS_DIRECTORY_FSYNC", False), \
+             self.assertLogs("root", level="DEBUG") as other:
+            config._fsync_directory("/tmp", config._DirFsyncPurpose.CREATE)  # 別用途は別枠で記録されるはず
+        self.assertTrue(any("CREATE" in line for line in other.output),
+                        "別の用途の記録が、先に使われた用途に食われている")
 
     def test_windows_skips_without_attempting_to_open(self):
         # ディレクトリを fsync する手段が無い環境では、「開こうとして失敗する」のではなく
