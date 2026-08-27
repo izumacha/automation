@@ -146,6 +146,35 @@ def _preserve_corrupt_file(path: str) -> None:
     logging.warning("読み込めないファイルを %s へ退避しました。必要ならこのファイルから手動で復旧できます。", backup_path)  # 退避先の場所をユーザーへ知らせる
 
 
+def _fsync_directory(directory: str) -> None:
+    """ディレクトリ自身を fsync し、その中で行った改名（os.replace）を確定させる。
+
+    ファイル本体を fsync しても、それは「ファイルの中身」がディスクへ届いた保証にすぎず、
+    「どの名前がどの中身を指すか」（ディレクトリエントリ）はまだ OS のメモリ上にしか
+    無いことがある。この状態で電源が落ちると、中身は無事なのに改名だけが失われ、
+    本番ファイルが**改名前の古い内容へ巻き戻る**（一時ファイル名のまま残る場合もある）。
+    ディレクトリを開いて fsync すると、この改名そのものがディスクへ確定する。
+
+    移植性（§10）: ディレクトリを開いて fsync できるのは POSIX（Linux / macOS）だけで、
+    Windows ではディレクトリを os.open できず PermissionError 等になる。ただし Windows の
+    os.replace（MoveFileEx）はメタデータを同期的に更新するため、この処理は不要である。
+    そのため失敗は「その環境では不要か、できないだけ」とみなし、デバッグログを残して
+    続行する（呼び出し元へ例外を伝えない）。ここで書き込み自体を失敗扱いにすると、
+    中身は正しく置き換わっているのに save_* が「保存に失敗」と誤報してしまう。
+    """
+    try:
+        fd = os.open(directory, os.O_RDONLY)  # ディレクトリ自身を読み取り専用で開いてファイルディスクリプタを得る
+    except OSError as e:  # Windows など、ディレクトリを開けない環境の場合
+        logging.debug("ディレクトリを開けないため fsync を省略しました (%s): %s", directory, e)  # 省略した理由をデバッグログに残す（§6: エラーを握り潰さない）
+        return  # 改名自体は完了しているので、確定できなくてもそのまま続行する
+    try:
+        os.fsync(fd)  # ディレクトリエントリ（名前→中身の対応）をディスクへ確定させる
+    except OSError as e:  # ディレクトリの fsync に対応しないファイルシステムなどの場合
+        logging.debug("ディレクトリの fsync に失敗しました (%s): %s", directory, e)  # 失敗理由をデバッグログに残す（§6）
+    finally:
+        os.close(fd)  # 例外の有無にかかわらずファイルディスクリプタを必ず閉じる（§8 リソースの解放）
+
+
 def _atomic_write_json(path: str, payload: object) -> None:
     """payload を JSON として path へ原子的（アトミック）に書き出す。
 
@@ -159,6 +188,10 @@ def _atomic_write_json(path: str, payload: object) -> None:
     上でのみ原子的に働くため。os.replace は POSIX / Windows どちらでも原子的に
     置き換わる（§10 移植性）。失敗時は一時ファイルを後始末し、例外を呼び出し元へ
     再送出して save_* 側でログに残せるようにする。
+
+    電源断への耐性には fsync が 2 段階必要である。中身の fsync（下の os.fsync）だけでは
+    「新しい中身」しか確定せず、それを本番の名前へ結び付けた改名は確定しないため、
+    最後に _fsync_directory でディレクトリエントリも確定させる（詳細は同関数の docstring）。
     """
     directory = os.path.dirname(path) or "."  # 一時ファイルを本番ファイルと同じディレクトリに作るため親ディレクトリを取り出す（空なら現在地）
     os.makedirs(directory, exist_ok=True)  # 保存先ディレクトリが存在しない場合は作成する
@@ -177,6 +210,9 @@ def _atomic_write_json(path: str, payload: object) -> None:
             # 後始末の失敗は致命的ではないため無視する。
             logging.debug("一時ファイルの後始末に失敗しました (%s): %s", tmp_path, e)  # 想定内の良性エラーなのでデバッグログにだけ原因を残す（§6: エラーを握り潰さない）
         raise  # 元の例外を呼び出し元へ再送出し、save_* 側で警告ログに残せるようにする
+    # ここへ来るのは os.replace が成功したときだけ（失敗時は上の except で再送出済み）。
+    # 改名をディスクへ確定させる。_fsync_directory は例外を投げない（＝保存の成否を変えない）。
+    _fsync_directory(directory)  # ディレクトリエントリを fsync し、電源断で改名が巻き戻るのを防ぐ
 
 
 @dataclass

@@ -2,6 +2,7 @@
 import datetime
 import json
 import os
+import stat
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -656,6 +657,100 @@ class AtomicWriteDurabilityTests(unittest.TestCase):
                 loaded = load_prefs()
             self.assertEqual(loaded.wake, "06:30")
             self.assertEqual(loaded.sleep, "22:00")
+
+
+class DirectoryFsyncTests(unittest.TestCase):
+    """改名（os.replace）を電源断から守るディレクトリ fsync のテスト。
+
+    ファイル本体の fsync だけでは「新しい中身」しか確定せず、それを本番の名前へ
+    結び付けた改名は確定しない。ディレクトリ自身を fsync して初めて改名が確定する。
+    """
+
+    def _record_fsync_targets(self, targets):
+        """os.fsync の呼び出し先が「ディレクトリかどうか」を targets へ記録する差し替え関数を作る。"""
+        real_fsync = os.fsync  # 差し替え前の本物の fsync を先に捕まえておく（記録後に実際の同期も行うため）
+
+        def _record(fd):
+            targets.append(stat.S_ISDIR(os.fstat(fd).st_mode))  # そのFDがディレクトリを指すかを記録する
+            return real_fsync(fd)  # 記録した後は本物の fsync をそのまま実行する
+
+        return _record  # 差し替え用の関数を返す
+
+    def test_save_tasks_fsyncs_directory_entry(self):
+        # 保存時に、ファイル本体だけでなくディレクトリ自身も fsync されること
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tasks_path = os.path.join(tmpdir, "tasks.json")
+            fsync_targets = []  # os.fsync が「ディレクトリ」に対して呼ばれたかを記録するリスト
+            with patch("reminder.config._TASKS_PATH", tasks_path), \
+                 patch("reminder.config._CONFIG_DIR", tmpdir), \
+                 patch("reminder.config.os.fsync", side_effect=self._record_fsync_targets(fsync_targets)):
+                save_tasks([Task(title="保存", due="2026-06-06T09:00:00")])
+            self.assertTrue(any(fsync_targets), "ディレクトリエントリが fsync されていない（改名が電源断で巻き戻り得る）")
+            self.assertIn(False, fsync_targets, "ファイル本体の fsync が失われている")
+
+    def test_save_prefs_fsyncs_directory_entry(self):
+        # 設定ファイル側も同じ経路（_atomic_write_json）を通るのでディレクトリが fsync されること
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "settings.json")
+            fsync_targets = []  # os.fsync が「ディレクトリ」に対して呼ばれたかを記録するリスト
+            with patch("reminder.config._SETTINGS_PATH", path), \
+                 patch("reminder.config._CONFIG_DIR", tmpdir), \
+                 patch("reminder.config.os.fsync", side_effect=self._record_fsync_targets(fsync_targets)):
+                save_prefs(Prefs(wake="06:30", sleep="22:00"))
+            self.assertTrue(any(fsync_targets), "設定保存でディレクトリエントリが fsync されていない")
+
+    def test_directory_fsync_failure_does_not_fail_save(self):
+        # ディレクトリの fsync に対応しないファイルシステムでも、保存自体は成功扱いのままであること
+        real_fsync = os.fsync  # 差し替え前の本物の fsync を捕まえておく（ファイル本体には実行するため）
+
+        def _fail_for_directory(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):  # 対象がディレクトリの場合は
+                raise OSError("このファイルシステムはディレクトリの fsync に対応していない")  # 非対応環境を再現して失敗させる
+            return real_fsync(fd)  # ファイル本体に対しては通常どおり同期する
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tasks_path = os.path.join(tmpdir, "tasks.json")
+            with patch("reminder.config._TASKS_PATH", tasks_path), \
+                 patch("reminder.config._CONFIG_DIR", tmpdir), \
+                 patch("reminder.config.os.fsync", side_effect=_fail_for_directory):
+                save_tasks([Task(title="保存", due="2026-06-06T09:00:00")])
+            with patch("reminder.config._TASKS_PATH", tasks_path):
+                loaded = load_tasks()  # 差し替えを解除した状態で読み直し、内容が保存されているか確かめる
+        self.assertEqual([t.title for t in loaded], ["保存"])
+
+    def test_directory_open_failure_does_not_fail_save(self):
+        # Windows のようにディレクトリを os.open できない環境でも、保存が成功扱いのままであること
+        real_open = os.open  # 差し替え前の本物の os.open を捕まえておく（一時ファイル作成には必要）
+
+        def _fail_for_directory(path, flags, *args, **kwargs):
+            if os.path.isdir(path):  # 開こうとしている対象がディレクトリの場合は
+                raise PermissionError("Windows ではディレクトリを開けない")  # Windows の挙動を再現して失敗させる
+            return real_open(path, flags, *args, **kwargs)  # ファイルに対しては通常どおり開く
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tasks_path = os.path.join(tmpdir, "tasks.json")
+            with patch("reminder.config._TASKS_PATH", tasks_path), \
+                 patch("reminder.config._CONFIG_DIR", tmpdir), \
+                 patch("reminder.config.os.open", side_effect=_fail_for_directory):
+                save_tasks([Task(title="保存", due="2026-06-06T09:00:00")])
+            with patch("reminder.config._TASKS_PATH", tasks_path):
+                loaded = load_tasks()  # 差し替えを解除した状態で読み直し、内容が保存されているか確かめる
+        self.assertEqual([t.title for t in loaded], ["保存"])
+
+    def test_directory_fsync_closes_descriptor(self):
+        # fsync が失敗しても、開いたディレクトリのFDが必ず閉じられること（FDリークを防ぐ）
+        closed = []  # os.close に渡されたファイルディスクリプタを記録するリスト
+        real_close = os.close  # 差し替え前の本物の os.close を捕まえておく
+
+        def _record_close(fd):
+            closed.append(fd)  # 閉じられたFDを記録する
+            return real_close(fd)  # 実際に閉じる
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch("reminder.config.os.close", side_effect=_record_close), \
+             patch("reminder.config.os.fsync", side_effect=OSError("fsync 非対応")):
+            config._fsync_directory(tmpdir)  # fsync が失敗する状況でディレクトリ同期を呼ぶ
+        self.assertEqual(len(closed), 1, "ディレクトリのファイルディスクリプタが閉じられていない")
 
 
 if __name__ == "__main__":
