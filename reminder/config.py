@@ -7,9 +7,11 @@
 from __future__ import annotations
 
 import datetime
+import enum
 import json
 import logging
 import os
+import stat
 import tempfile
 import uuid
 from collections.abc import Callable
@@ -50,6 +52,46 @@ SaveBlockedListener = Callable[[str, "str | None"], None]  # UI 通知コール�
 # コールバックで通知し、表示方法（ステータスバー・ダイアログ等）は登録側（app.py）に任せる。
 _save_blocked_listener: SaveBlockedListener | None = None  # 保存拒否を通知する登録済みコールバック（未登録なら None）
 _save_blocked_notified = False  # このセッションで保存拒否をすでに通知したかどうか（通知はセッション中 1 回だけ）
+
+# ディレクトリを開いて fsync できるかどうか（POSIX だけができる）。os.name は実行中に
+# 変わらないので起動時に 1 度だけ判定する。os.name を直接見ずにこの定数を挟むのは、
+# テストが「Windows の分岐」を試すときに標準ライブラリの os を書き換えずに済ませるため
+# （reminder.config.os は os モジュールそのものなので、patch すると全モジュールに効いてしまう）。
+_SUPPORTS_DIRECTORY_FSYNC = os.name == "posix"  # ディレクトリの fsync が可能な環境かどうか
+
+
+@enum.unique  # 値（説明文）が重なった用途は別名に潰れて予算を共有してしまうので、import 時に弾く
+class _DirFsyncPurpose(enum.Enum):
+    """ディレクトリ fsync を行う用途。**値は「省略されたときに何が起きうるか」の説明文**。
+
+    説明文を別の対応表に持たず enum の値そのものにしているのは、用途を足したときに
+    説明文だけ書き忘れる余地を無くすため（表を引く形だと記載漏れが実行時まで分からず、
+    しかも引き損ねた例外が _fsync_directory の「例外を投げない」契約を破って
+    「保存に失敗しました」の誤報になる）。値を持つ enum なら対応は構造上ずれない。
+
+    用途を分ける理由は 2 つある。(1) 省略されたとき何が起きるかが用途ごとに違い、
+    たとえば隔離の側で「直前の保存が失われる」と書くと保存していないのに保存が危ういと
+    誤解させる。(2) 後述の「1 回だけ」の警告予算を用途ごとに持つため。予算を共有すると、
+    危険度の低い経路（隔離や、まだ何も書いていない段階のディレクトリ作成）が唯一の枠を
+    使い切り、実際にデータが危うい保存経路の警告が二度と出なくなる。
+
+    値を説明文にしている副作用として、**文面が完全に一致する用途を足すと Python が
+    それを別名（alias）として畳んでしまう**。畳まれた 2 つは同一メンバーになるため
+    予算を共有し、上で避けたはずの「危険な側が黙らされる」状態が戻ってくる（しかも
+    ログには先に定義された方の名前が出るので、どの改名が確定できていないのかを
+    取り違える）。@enum.unique を付けて、その状態を import 時のエラーにしている。
+    """
+
+    CREATE = "作成した保存先ディレクトリが電源断で消え、中のファイルごと失われる可能性があります。"  # 保存先ディレクトリを新規作成した用途
+    SAVE = "保存内容は書けていますが、電源断で直前の保存が失われる可能性があります。"  # 原子的書き込みの改名を確定させる用途
+    QUARANTINE = "退避（.corrupt への改名）が電源断で巻き戻る可能性があります。データ自体は失われません。"  # 壊れたファイルの隔離を確定させる用途
+
+
+# ディレクトリ fsync の省略は「電源断への耐性が失われたまま誰も気づけない」状態なので、
+# POSIX では 1 回だけ警告として知らせる（保存のたびに鳴らすとうるさいため、
+# _save_blocked_notified と同じ「1 回だけ」方式にする）。予算は上記のとおり用途ごと。
+_dir_fsync_warned: set[_DirFsyncPurpose] = set()  # すでに警告した用途の集合
+_dir_fsync_platform_noted: set[_DirFsyncPurpose] = set()  # 「この環境では fsync できない」ことをすでに記録した用途の集合
 
 
 def set_save_blocked_listener(listener: SaveBlockedListener | None) -> None:
@@ -143,7 +185,195 @@ def _preserve_corrupt_file(path: str) -> None:
     except OSError as e:  # 改名に失敗した場合（権限不足・ファイルが既に無い等）
         logging.warning("壊れたファイルの退避に失敗しました (%s → %s): %s", path, backup_path, e)  # 退避失敗も握り潰さずログに残す（§6）
         return  # 退避できなくても読み込み処理自体は続行する（fail-safe）
+    # この改名も _atomic_write_json と同じくディレクトリエントリを書き換えるので、同じように確定させる。
+    # 片方だけ確定させると「このモジュールの改名は確定済み」という約束が場所によって崩れ、
+    # 監査する人が隔離も守られていると誤解する（隔離が巻き戻ってもデータは失われず次回起動で
+    # やり直されるが、不変条件を黙って破らないために揃えておく）。
+    _fsync_directory(os.path.dirname(path) or ".", _DirFsyncPurpose.QUARANTINE)  # 退避（改名）をディスクへ確定させる
     logging.warning("読み込めないファイルを %s へ退避しました。必要ならこのファイルから手動で復旧できます。", backup_path)  # 退避先の場所をユーザーへ知らせる
+
+
+def _claim_once_per_purpose(budget: set[_DirFsyncPurpose], purpose: _DirFsyncPurpose) -> bool:
+    """purpose がその予算枠をまだ使っていなければ確保して True を返す（2 回目以降は False）。
+
+    「用途ごとに 1 回だけ」という同じ門を、警告（_warn_dir_fsync_unavailable）と
+    省略の記録（_note_platform_cannot_fsync_directories）が別々の集合で持っている。
+    門の形まで二重に書くと、予算の方針を変えたときに片方だけ直してしまい、環境によって
+    枠の効き方が食い違う — 用途を分けて避けたはずの「危険な側が黙らされる」状態が、
+    今度は POSIX と非 POSIX の差として戻ってくる。門はここ 1 箇所にし、集合と
+    ログの出し方（水準・文面）だけを呼び出し側の違いとして残す（§6 DRY）。
+    """
+    if purpose in budget:  # この用途ではすでに枠を使い切っている場合は
+        return False  # 呼び出し側に「今回は出さない」と伝える
+    budget.add(purpose)  # 枠を確保したことを記録する
+    return True  # 呼び出し側に「今回は出してよい」と伝える
+
+
+def _note_platform_cannot_fsync_directories(purpose: _DirFsyncPurpose) -> None:
+    """この環境ではディレクトリを fsync できないことを、用途ごとに 1 回だけ記録する。
+
+    このモジュールの方針は「耐久性を確保できなかったら黙って省略しない」で、POSIX 側の
+    失敗は _warn_dir_fsync_unavailable が警告として残す。手段が無い環境（Windows）だけが
+    無記録の no-op のままだと、電源断で保存が巻き戻ったときにログへ手がかりが 1 つも残らず、
+    アプリの不具合と区別できない（§10 の「必ずフォールバックを用意する」）。
+
+    用途を受け取って記録に載せ、予算も用途ごとに持つ理由は POSIX 側とまったく同じ。
+    用途を落とすと、保存・作成・隔離のどれが確定できていないのか区別できない。とくに
+    Windows は穴が恒久的に残る側なので、記録が最も役に立つべき環境で最も情報が少ない、
+    という逆転を避ける（作成が確定できなかった場合に「改名が巻き戻る」と書いてしまう
+    ような、事実と違う説明も防げる）。
+
+    水準を警告ではなくデバッグにしているのは、これがユーザーには対処しようのない
+    恒久的な環境の性質で、起動のたびに警告を出しても行動につながらないため。障害の申告を
+    受けた側がデバッグログを有効にすれば「この環境では確定できていなかった」と分かればよい。
+    """
+    if not _claim_once_per_purpose(_dir_fsync_platform_noted, purpose):  # この用途ではすでに記録済みなら
+        return  # 保存のたびに同じ行を出さない
+    logging.debug(
+        "この環境ではディレクトリを fsync できないため確定を省略します"
+        "（os.name=%s, 用途=%s）。%s", os.name, purpose.name, purpose.value,
+    )  # 省略している事実と、その用途で起こりうることを残す
+
+
+def _warn_dir_fsync_unavailable(
+    what: str, directory: str, error: Exception, purpose: _DirFsyncPurpose
+) -> None:
+    """ディレクトリ fsync を省略した事実を、用途ごとに 1 回だけ警告として記録する。
+
+    呼ばれるのは POSIX だけ（_fsync_directory が非 POSIX を早期 return するため）。
+    POSIX で省略が起きるのは想定外（SELinux/AppArmor の拒否、FUSE 系ホーム、制限の強い
+    コンテナのマウントなど）で、そのとき失われるのはまさに _fsync_directory が足そうと
+    した電源断耐性そのものである。デバッグログに落とすと cli.py が INFO で起動する以上
+    ユーザーには一生見えないため、警告として残す（§6 エラーを握り潰さない）。
+    ただし保存のたびに鳴らさないよう、警告は用途ごとに 1 回だけにして以降はデバッグに落とす。
+
+    purpose は _DirFsyncPurpose のいずれか。これが警告文の結び（何が起きうるか）と
+    「1 回だけ」の予算の両方を決める（理由は _DirFsyncPurpose の docstring 参照）。
+    """
+    if not _claim_once_per_purpose(_dir_fsync_warned, purpose):  # この用途ではすでに警告済みの場合は
+        # 用途名まで載せる。what は 2 種類しかなく 3 つの用途で共通なので、これを落とすと
+        # 繰り返し失敗しているデバッグログを読んでも、保存・作成・隔離のどれが確定できて
+        # いないのか区別できない（用途を分けて持っている意味が消える）。
+        logging.debug("%s (%s, 用途=%s): %s", what, directory, purpose.name, error)  # 繰り返しを避けてデバッグログに留める
+        return  # 警告は重ねない
+    logging.warning(
+        "%s (%s): %s — %s", what, directory, error, purpose.value,
+    )  # 耐性が失われている事実と、その用途で何が起きうるかを併せて伝える（値が説明文そのもの）
+
+
+def _make_directory_durable(directory: str) -> None:
+    """directory を作成し、**新しく作った階層**の親を fsync して存在を確定させる。
+
+    os.makedirs でディレクトリを作っただけでは、その「名前」は親ディレクトリの
+    エントリとして OS のメモリ上にしか無いことがある。この状態で電源が落ちると、
+    中のファイルを丁寧に fsync していてもディレクトリごと消える。初回起動
+    （~/.config/reminder がまだ無い状態）で保存した直後に電源が落ちると、
+    入力したタスクが丸ごと失われるのはこの経路である。
+
+    作成前に「どの階層が存在しないか」を控えておき、作成後に浅い方から順に
+    その親を fsync する。既にディレクトリが在る通常の保存では控えが空になるので、
+    余計な fsync は 1 回も増えない。
+    """
+    missing: list[str] = []  # これから新しく作られる（＝今は存在しない）階層を控えるリスト
+    probe = directory  # 存在確認をしながら上へ辿るための作業用パス
+    while probe and not os.path.isdir(probe):  # 存在しない階層をルート方向へ遡り続ける
+        missing.append(probe)  # この階層は新規作成されるので控えておく
+        parent = os.path.dirname(probe)  # 1 つ上の階層を求める
+        if parent == probe:  # ルート（"/" や "C:\\"）に到達してそれ以上遡れない場合
+            break  # 無限ループを避けて打ち切る
+        probe = parent  # 1 つ上の階層へ移って確認を続ける
+    os.makedirs(directory, exist_ok=True)  # 保存先ディレクトリが存在しない場合は作成する
+    for created in reversed(missing):  # 浅い階層から順に（親が確定してから子を確定させる）
+        _fsync_directory(os.path.dirname(created) or ".", _DirFsyncPurpose.CREATE)  # 新しく作った階層の名前を、その親を fsync して確定させる
+
+
+def _fsync_directory(directory: str, purpose: _DirFsyncPurpose) -> None:
+    """ディレクトリ自身を fsync し、その中で行った変更（改名・作成）を確定させる。
+
+    確定させる対象は用途によって違う: SAVE / QUARANTINE は os.replace による改名、
+    CREATE は _make_directory_durable が作ったディレクトリの存在そのもの。どちらも
+    「親ディレクトリのエントリ」という同じものなので、同じ関数で扱える。
+
+    ファイル本体を fsync しても、それは「ファイルの中身」がディスクへ届いた保証にすぎず、
+    「どの名前がどの中身を指すか」（ディレクトリエントリ）はまだ OS のメモリ上にしか
+    無いことがある。この状態で電源が落ちると、中身は無事なのに改名だけが失われ、
+    本番ファイルが**改名前の古い内容へ巻き戻る**（一時ファイル名のまま残る場合もある）。
+    ディレクトリを開いて fsync すると、この改名そのものがディスクへ確定する。
+
+    移植性（§10）: ディレクトリを開いて fsync できるのは POSIX（Linux / macOS）だけで、
+    Windows ではディレクトリを os.open できない。そこで非 POSIX では**何も試みずに戻る**
+    （必ず失敗する os.open を保存のたびに呼んで例外を生成するより、静的に分かっている
+    前提をそのまま条件に書くほうが意図が読み取れる）。
+
+    **Windows に残る限界（既知の未解決事項）**: 上の早期 return は「Windows では不要」
+    なのではなく「**Windows では手段が無い**」という妥協である。CPython の os.replace は
+    MoveFileExW(src, dst, MOVEFILE_REPLACE_EXISTING) を呼ぶだけで、Microsoft が
+    「呼び出しがディスクへ届くまで戻らない」と定める MOVEFILE_WRITE_THROUGH を渡して
+    いない（3.11 と main の Modules/posixmodule.c で確認。どちらも同フラグの出現数は 0）。
+    NTFS のジャーナルが保証するのは原子性（改名が起きたか起きなかったかのどちらか）で
+    あって耐久性ではないため、**Windows では改名直後の電源断で直前の保存が巻き戻る
+    可能性が残る**。Python の標準 API にこれを強制する移植可能な手段は無く、塞ぐには
+    ctypes 等で Win32 を直接呼ぶ必要があるので、現時点では限界として明記するに留める
+    （POSIX 側の穴は塞げているのに Windows も安全だと誤解されるのを防ぐため）。
+
+    **macOS に残る限界（既知の未解決事項）**: POSIX 側も完全ではない。macOS の fsync(2) は
+    データをドライバへ渡すだけで、ドライブ自身の揮発性キャッシュのフラッシュまでは要求しない
+    （Apple の man ページは、その保証が要るアプリは fcntl(F_FULLFSYNC) を使うよう明記している。
+    SQLite が F_FULLFSYNC を実装しているのはこのため）。CPython の os.fsync は F_FULLFSYNC を
+    発行しないので、**macOS では電源断で改名もファイル内容も失われる可能性が残る**。
+    塞ぐなら fcntl.fcntl(fd, F_FULLFSYNC) を使うことになるが、性能への影響が大きく、
+    手元に検証環境が無いため今は限界として明記するに留める。Windows の項と同じ理由で、
+    「POSIX なら安全」と誤解されるのを防ぐために書いている。
+
+    POSIX で失敗した場合は「できないだけ」とみなし、記録を残して続行する。ここで
+    書き込み自体を失敗扱いにすると、中身は正しく置き換わっているのに save_* が
+    「保存に失敗」と誤報してしまう（記録の方針は _warn_dir_fsync_unavailable を参照）。
+
+    **この関数は例外を投げない。** 後始末の os.close も含めて捕捉する。呼び出し元は
+    3 つあり（_atomic_write_json の改名後・_preserve_corrupt_file の隔離後・
+    _make_directory_durable の作成後）、いずれもこの前提のうえで無防備に呼んでいる。
+    とくに _preserve_corrupt_file は起動時の読み込み経路なので、ここから例外が漏れると
+    壊れたファイルの隔離どころか起動そのものを巻き込む。close は
+    NFS / FUSE 上で遅延した I/O エラーを報告することがあり、これを外へ漏らすと
+    「書き込みも改名も成功したのに保存失敗と誤報する」という、まさにこの関数が
+    避けようとしている誤りが起きる。
+
+    捕捉を OSError ではなく Exception にしているのは、この「投げない」という約束を
+    例外の種類の見積もりに頼らず守るため。実際に出るのはほぼ OSError だが、たとえば
+    パスに NUL が混じった場合の ValueError のように別種が出る余地があり、1 つでも
+    漏れれば呼び出し元は誤報を出す。ここで起きる失敗はどれも「耐性を足せなかった」
+    だけで保存の成否とは無関係なので、種類を問わず記録して飲み込むのが正しい
+    （§6 の「握り潰さない」に対しては、飲み込む代わりに必ず記録することで応じている）。
+    """
+    if not _SUPPORTS_DIRECTORY_FSYNC:  # Windows など、ディレクトリを fsync する手段が無い環境の場合
+        _note_platform_cannot_fsync_directories(purpose)  # 黙って no-op にせず、省略している事実を用途ごとに 1 回だけ残す
+        return  # 手段が無いので何もしない（不要だからではない。上の「Windows に残る限界」を参照）
+    try:
+        # O_DIRECTORY を添える。これが無いと、相手が（将来の呼び出し間違いや、作成直後に
+        # 差し替えられた場合などで）ディレクトリでなくても os.open が成功してしまい、
+        # 別のオブジェクトを fsync して「確定した」つもりで戻る — 何も記録されないまま
+        # 耐久性を失う fail-open になる。付けておけば ENOTDIR が下の警告経路へ流れる。
+        fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))  # ディレクトリ自身を読み取り専用で開いてファイルディスクリプタを得る
+    except Exception as e:  # POSIX なのに開けない場合（マウントや LSM の制限など、想定外）
+        _warn_dir_fsync_unavailable("ディレクトリを開けないため fsync を省略しました", directory, e, purpose)  # 耐性が失われたことを用途ごとに 1 回だけ警告する（§6）
+        return  # 改名自体は完了しているので、確定できなくてもそのまま続行する
+    try:
+        # getattr の既定値 0 は「O_DIRECTORY を持たない環境では何も要求しない」を意味するので、
+        # そこでは上の os.open が普通のファイルにも成功してしまい fail-open が復活する
+        # （その環境では本番だけが素通りし、CI の検査は落ちるという最悪の組み合わせになる）。
+        # フラグの有無に依存せず、開いた相手が本当にディレクトリかを確かめる。
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):  # 開いた相手がディレクトリでない場合
+            raise NotADirectoryError(f"ディレクトリではありません: {directory!r}")  # 下の警告経路へ流す
+        os.fsync(fd)  # ディレクトリエントリ（名前→中身の対応）をディスクへ確定させる
+    except Exception as e:  # ディレクトリの fsync に対応しないファイルシステムなどの場合
+        _warn_dir_fsync_unavailable("ディレクトリの fsync に失敗しました", directory, e, purpose)  # 耐性が失われたことを用途ごとに 1 回だけ警告する（§6）
+    finally:
+        try:
+            os.close(fd)  # 例外の有無にかかわらずファイルディスクリプタを必ず閉じる（§8 リソースの解放）
+        except Exception as e:  # close 自体が遅延 I/O エラーを報告した場合（NFS / FUSE で起こりうる）
+            # ここで捕まえないと finally の例外がそのまま呼び出し元へ抜け、保存は成功して
+            # いるのに save_* が「保存に失敗しました」と誤報する（docstring の「例外を投げない」も破れる）。
+            logging.debug("ディレクトリのファイルディスクリプタを閉じられませんでした (%s): %s", directory, e)  # 後始末の失敗は致命的ではないのでデバッグログに留める（§6）
 
 
 def _atomic_write_json(path: str, payload: object) -> None:
@@ -159,12 +389,34 @@ def _atomic_write_json(path: str, payload: object) -> None:
     上でのみ原子的に働くため。os.replace は POSIX / Windows どちらでも原子的に
     置き換わる（§10 移植性）。失敗時は一時ファイルを後始末し、例外を呼び出し元へ
     再送出して save_* 側でログに残せるようにする。
+
+    電源断への耐性には fsync が 3 段階必要である。(1) 保存先ディレクトリを新規作成した
+    ときはその存在自体（_make_directory_durable）、(2) 一時ファイルの中身（下の os.fsync）、
+    (3) その中身を本番の名前へ結び付けた改名（最後の _fsync_directory）。1 つでも欠けると、
+    残りをどれだけ丁寧に同期しても、電源断でディレクトリごと消えたり改名だけが
+    巻き戻ったりする（詳細は各関数の docstring）。
+
+    **代償（§8「UI を止めない」と §9 fail-safe の兼ね合い）**: この関数 1 回あたりの同期的な fsync が 1 → 2 に増えた
+    （新規作成時はさらに増える）。呼び出しは Tk のメインスレッド上で起きるため、
+    たとえば PlannerApp._complete() は save_prefs と save_tasks を続けて呼ぶので、
+    チェック 1 回で 4 回の fsync が走る。回転ディスク・暗号化/FUSE のホーム・NFS 上の
+    ~/.config では、ジャーナルのコミット待ちで数百 ms 画面が止まりうる。耐久性のために
+    受け入れているトレードオフだが、体感が問題になるなら fsync を減らすのではなく、
+    _complete の 2 回の保存を 1 つの書き込み経路へまとめる（＝完了 1 回あたり 4 回でなく
+    2 回にする）方向で直すこと。fsync を外すと本関数の存在理由そのものが消える。
     """
     directory = os.path.dirname(path) or "."  # 一時ファイルを本番ファイルと同じディレクトリに作るため親ディレクトリを取り出す（空なら現在地）
-    os.makedirs(directory, exist_ok=True)  # 保存先ディレクトリが存在しない場合は作成する
+    _make_directory_durable(directory)  # 保存先ディレクトリを作り、新規作成した階層はその存在自体も確定させる
     # delete=False ではなく mkstemp を使い、書き込み後に os.replace で本番へ差し替える
     fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".tmp-", suffix=".json")  # 同一ディレクトリ上に一時ファイルを作成しFDを得る
     try:
+        # os.fdopen の失敗時にここで os.close(fd) を足してはいけない（一度入れて戻した）。
+        # os.fdopen は io.open であり、渡した瞬間に fd の所有権を取って closefd=True の
+        # FileIO を作る。TextIOWrapper の生成などが失敗すると io.open 自身が内部で閉じるため、
+        # こちらでもう一度閉じると EBADF が except 節から送出されて **本当の失敗理由を覆い隠す**
+        # （実測: LookupError「unknown encoding」が OSError「Bad file descriptor」に化けた）。
+        # §6「例外は黙って捨てず、文脈を付けて再送出する」に反するうえ、fd 番号が再利用されて
+        # いれば無関係な fd を閉じる。所有権は io.open にあるので、こちらは何もしないのが正しい。
         with os.fdopen(fd, "w", encoding="utf-8") as f:  # 低レベルFDをUTF-8テキストファイルとして開く（with終了時にcloseされる）
             json.dump(payload, f, ensure_ascii=False, indent=2)  # ペイロードをインデント付きJSONとして一時ファイルへ書き出す
             f.flush()  # PythonのバッファをOSへ確実に渡す
@@ -177,6 +429,9 @@ def _atomic_write_json(path: str, payload: object) -> None:
             # 後始末の失敗は致命的ではないため無視する。
             logging.debug("一時ファイルの後始末に失敗しました (%s): %s", tmp_path, e)  # 想定内の良性エラーなのでデバッグログにだけ原因を残す（§6: エラーを握り潰さない）
         raise  # 元の例外を呼び出し元へ再送出し、save_* 側で警告ログに残せるようにする
+    # ここへ来るのは os.replace が成功したときだけ（失敗時は上の except で再送出済み）。
+    # 改名をディスクへ確定させる。_fsync_directory は例外を投げない（＝保存の成否を変えない）。
+    _fsync_directory(directory, _DirFsyncPurpose.SAVE)  # ディレクトリエントリを fsync し、電源断で改名が巻き戻るのを防ぐ
 
 
 @dataclass
