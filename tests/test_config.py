@@ -683,10 +683,11 @@ class DirectoryFsyncTests(unittest.TestCase):
     """
 
     def setUp(self):
-        # 「省略の警告はセッション中 1 回だけ」というモジュール状態がテスト間で漏れないようにする。
-        # 単に False を代入するだけだと、警告を発火させたテストが _dir_fsync_warned=True を
+        # 「省略の警告は用途ごとに 1 回だけ」というモジュール状態（_DIR_FSYNC_* を溜める集合）が
+        # テスト間で漏れないようにする。空にするだけだと、警告を発火させたテストがその用途を
         # 後続のテスト（別クラス・別ファイル）へ置き土産にし、単体では通るのに全体実行では
-        # 落ちる順序依存の不安定テストを生む。addCleanup で元の値へ必ず戻す。
+        # 落ちる順序依存の不安定テストを生む。addCleanup では**元の集合オブジェクトそのもの**を
+        # 戻すので、このクラスが空集合へ差し替えている間に溜めた用途は持ち出されない。
         self.addCleanup(setattr, config, "_dir_fsync_warned", config._dir_fsync_warned)
         config._dir_fsync_warned = set()
 
@@ -728,17 +729,26 @@ class DirectoryFsyncTests(unittest.TestCase):
             self.assertTrue(any("電源断" in r.getMessage() for r in records),
                             "注入した失敗に到達しておらず、この検査は何も確かめていない")
 
+    @staticmethod
+    def _is_directory_fd(fd):
+        """ファイルディスクリプタがディレクトリを指すかどうかを返す。
+
+        「その FD はディレクトリか」の判定はこのクラスの各所（記録係 3 種と失敗注入 2 種）が
+        使うので、判定方法をここ 1 箇所に閉じ込める（§6 DRY）。見分け方を変えるときは
+        この関数だけを直せばよい。
+        """
+        return stat.S_ISDIR(os.fstat(fd).st_mode)  # FD の情報からディレクトリかどうかを判定する
+
     def _record_synced_directories(self, synced):
         """fsync 対象がディレクトリなら (デバイス番号, inode) を synced へ記録する差し替え関数を作る。
 
-        FD からは名前が分からないので識別子で控える。同じ組み立てが 3 箇所に増えたため
-        共通化した（§6 DRY）。ディレクトリの見分け方を変えるときはここだけ直せばよい。
+        FD からは名前が分からないので識別子で控える。
         """
         real_fsync = os.fsync  # 差し替え前の本物の fsync を先に捕まえておく
 
         def _record(fd):
-            info = os.fstat(fd)  # そのFDが指す対象の情報を取得する
-            if stat.S_ISDIR(info.st_mode):  # ディレクトリだった場合のみ
+            if self._is_directory_fd(fd):  # ディレクトリだった場合のみ
+                info = os.fstat(fd)  # 識別子を得るために情報を取得する
                 synced.append((info.st_dev, info.st_ino))  # 識別子を記録する
             return real_fsync(fd)  # 記録した後は本物の fsync をそのまま実行する
 
@@ -749,7 +759,7 @@ class DirectoryFsyncTests(unittest.TestCase):
         real_fsync = os.fsync  # 差し替え前の本物の fsync を先に捕まえておく（記録後に実際の同期も行うため）
 
         def _record(fd):
-            targets.append(stat.S_ISDIR(os.fstat(fd).st_mode))  # そのFDがディレクトリを指すかを記録する
+            targets.append(self._is_directory_fd(fd))  # そのFDがディレクトリを指すかを記録する
             return real_fsync(fd)  # 記録した後は本物の fsync をそのまま実行する
 
         return _record  # 差し替え用の関数を返す
@@ -782,7 +792,7 @@ class DirectoryFsyncTests(unittest.TestCase):
             return real_replace(src, dst)  # 実際に改名する
 
         def _record_fsync(fd):
-            if stat.S_ISDIR(os.fstat(fd).st_mode):  # ディレクトリに対する fsync のみ
+            if self._is_directory_fd(fd):  # ディレクトリに対する fsync のみ
                 events.append("fsync_dir")  # 記録する（ファイル本体の fsync は順序の対象外）
             return real_fsync(fd)  # 実際に同期する
 
@@ -832,7 +842,7 @@ class DirectoryFsyncTests(unittest.TestCase):
         real_fsync = os.fsync  # 差し替え前の本物の fsync を捕まえておく（ファイル本体には実行するため）
 
         def _fail_for_directory(fd):
-            if stat.S_ISDIR(os.fstat(fd).st_mode):  # 対象がディレクトリの場合は
+            if self._is_directory_fd(fd):  # 対象がディレクトリの場合は
                 raise OSError("このファイルシステムはディレクトリの fsync に対応していない")  # 非対応環境を再現して失敗させる
             return real_fsync(fd)  # ファイル本体に対しては通常どおり同期する
 
@@ -969,8 +979,23 @@ class DirectoryFsyncTests(unittest.TestCase):
         # 実際に出るのはほぼ OSError だが、たとえばパスに NUL が混じった場合の ValueError の
         # ように別種が出る余地があり、1 つでも漏れれば呼び出し元が保存失敗と誤報する。
         with tempfile.TemporaryDirectory() as tmpdir, \
-             patch("reminder.config.os.open", side_effect=ValueError("embedded null byte")):
+             patch("reminder.config._SUPPORTS_DIRECTORY_FSYNC", True), \
+             patch("reminder.config.os.open", side_effect=ValueError("embedded null byte")), \
+             self._captured_warnings():  # 警告はここでは検査しないので、CI の出力を汚さないよう受け止める
             config._fsync_directory(tmpdir)  # 例外が送出されなければテスト成功（送出されればここで落ちる）
+
+    def test_unknown_purpose_does_not_break_the_no_throw_contract(self):
+        # 表に載っていない用途を渡しても例外を投げず、警告自体は出せること。
+        # 結びを表から [] で引くと、呼び出し先の追加や打ち間違いで KeyError が
+        # _atomic_write_json を抜け、改名まで成功しているのに save_* が
+        # 「保存に失敗しました」と誤報する（捕捉を Exception へ広げてまで守っている契約が、
+        # 表の記載漏れという別経路で破れる）。
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch("reminder.config._SUPPORTS_DIRECTORY_FSYNC", True), \
+             patch("reminder.config.os.open", side_effect=OSError("開けない")), \
+             self.assertLogs("root", level="WARNING") as captured:
+            config._fsync_directory(tmpdir, "表に無い用途")  # 例外が漏れればここで落ちる
+        self.assertIn("電源断", captured.output[0], "未知の用途でも何が起きうるかは伝えるべき")
 
     @_posix_only
     def test_save_does_not_report_failure_when_close_fails(self):
@@ -981,9 +1006,9 @@ class DirectoryFsyncTests(unittest.TestCase):
         real_close = os.close  # 差し替え前の本物の os.close を捕まえておく
 
         def _fail_for_directory_fd(fd):
-            mode = os.fstat(fd).st_mode  # 閉じる前にそのFDの種別を調べる
+            is_directory = self._is_directory_fd(fd)  # 閉じる前にそのFDの種別を調べる
             real_close(fd)  # FDリークを避けるため、失敗を装う場合でも実際には閉じる
-            if stat.S_ISDIR(mode):  # 対象がディレクトリだった場合は
+            if is_directory:  # 対象がディレクトリだった場合は
                 raise OSError("NFS の遅延 I/O エラー")  # close 時の遅延エラーを再現する
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1013,9 +1038,13 @@ class DirectoryFsyncTests(unittest.TestCase):
                 config._fsync_directory(tmpdir)  # 2 回目以降は警告を繰り返さない
 
     def test_windows_skips_without_attempting_to_open(self):
-        # Windows は os.replace がメタデータを同期更新するため fsync は不要。
-        # 「開こうとして失敗する」のではなく、そもそも開きに行かないこと（＝保存のたびに
-        # 必ず失敗する呼び出しと例外生成を繰り返さないこと）と、警告にしないことを検査する。
+        # ディレクトリを fsync する手段が無い環境では、「開こうとして失敗する」のではなく
+        # そもそも開きに行かないこと（＝保存のたびに必ず失敗する呼び出しと例外生成を
+        # 繰り返さないこと）と、警告にしないことを検査する。
+        # 注意: これは Windows が安全だという意味ではない。CPython の os.replace は
+        # MOVEFILE_WRITE_THROUGH を渡さないため Windows には耐久性の穴が残っており、
+        # ここで確かめているのは「手段が無いので試みない」という挙動だけである
+        # （詳細は _fsync_directory の docstring「Windows に残る限界」）。
         opened = []  # os.open が呼ばれたら記録するリスト
         real_open = os.open  # 差し替え前の本物の os.open を捕まえておく
 

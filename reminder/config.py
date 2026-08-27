@@ -71,6 +71,9 @@ _DIR_FSYNC_CONSEQUENCE = {
     _DIR_FSYNC_SAVE: "保存内容は書けていますが、電源断で直前の保存が失われる可能性があります。",
     _DIR_FSYNC_QUARANTINE: "退避（.corrupt への改名）が電源断で巻き戻る可能性があります。データ自体は失われません。",
 }
+# 表に載っていない用途が渡されたときの結び。表の記載漏れで警告そのものを失わせない
+# ための保険で、通常は使われない（_warn_dir_fsync_unavailable のコメント参照）。
+_DIR_FSYNC_UNKNOWN_CONSEQUENCE = "電源断でこの改名が巻き戻る可能性があります。"
 _dir_fsync_warned: set[str] = set()  # すでに警告した用途（_DIR_FSYNC_* のいずれか）の集合
 
 
@@ -190,8 +193,13 @@ def _warn_dir_fsync_unavailable(what: str, directory: str, error: Exception, pur
         logging.debug("%s (%s): %s", what, directory, error)  # 繰り返しを避けてデバッグログに留める
         return  # 警告は重ねない
     _dir_fsync_warned.add(purpose)  # この用途は警告済みとして記録する（集合なので global 宣言は不要）
+    # 結びは .get で引く。未知の purpose（新しい呼び出し先の追加や打ち間違い）で KeyError を
+    # 投げると、それが _atomic_write_json を抜けて save_* の except Exception に捕まり、
+    # 改名まで成功しているのに「保存に失敗しました」と誤報する。捕捉を Exception へ広げてまで
+    # 守っている「例外を投げない」契約を、表の記載漏れで破らせないための既定値。
+    consequence = _DIR_FSYNC_CONSEQUENCE.get(purpose, _DIR_FSYNC_UNKNOWN_CONSEQUENCE)  # 用途に応じた結びを取り出す（未知なら汎用文）
     logging.warning(
-        "%s (%s): %s — %s", what, directory, error, _DIR_FSYNC_CONSEQUENCE[purpose],
+        "%s (%s): %s — %s", what, directory, error, consequence,
     )  # 耐性が失われている事実と、その用途で何が起きうるかを併せて伝える
 
 
